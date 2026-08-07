@@ -1,2 +1,6 @@
 .venv/
 __pycache__/
+logs/
+relay_state.json
+memory.db*
+*.kgraph.json

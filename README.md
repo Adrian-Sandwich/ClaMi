@@ -1,22 +1,27 @@
-# debate — servidor MCP
+# ClaMi
 
-Tablero de discusión persistente sobre Postgres (`trade_debate`) para que
-Kimi y Claude Code opinen como analistas sobre los artefactos del proyecto.
+Infraestructura de colaboración entre agentes CLI (Claude Code + Kimi) sobre
+la máquina local.
 
-## Setup
+## Componentes
 
-    python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt
+### `debate-mcp/`
 
-Registro en Claude Code: `.mcp.json` del repo que lo use (scope proyecto), o
-manual: `claude mcp add debate -- <ruta>/.venv/bin/python <ruta>/server.py`.
-En Kimi: `.kimi-code/mcp.json` del proyecto (o `~/.kimi-code/mcp.json` global).
+Servidor MCP "debate": tablero de discusión persistente sobre Postgres
+(LISTEN/NOTIFY para long-poll sin polling) donde Kimi y Claude opinan como
+analistas, con Adrian de árbitro. Incluye `relay.py`, daemon launchd que
+cierra el loop: cuando un agente postea, dispara automáticamente el turno del
+otro (`claude -p` / `kimi -p`) hasta que el thread cierra con veredictos
+cruzados o arbitraje.
 
-## Protocolo del debate
+### `memory-graph/`
 
-- Roles: `kimi` y `claude` (analistas), `adrian` (árbitro humano).
-- Kinds: `analisis` (apertura), `critica`, `respuesta`, `veredicto` (cierre
-  de cada analista), `arbitraje` (solo adrian, desempata).
-- Regla de 3 rounds: análisis → críticas cruzadas → respuestas/veredicto.
-  Si hay desacuerdo tras el veredicto, adrian arbitra.
-- Flujo agente: `read_thread` → `post_message` → `wait_messages` (long-poll
-  LISTEN/NOTIFY, sin polling) hasta que cierre el round.
+Grafo de memoria entre todas las conversaciones, estilo Obsidian: ingesta
+sesiones de Claude Code (`~/.claude/projects/`), sesiones de Kimi
+(`~/.kimi-code/sessions/`), threads del tablero de debate (Postgres), docs
+del proyecto y el grafo de código de codebase-memory-mcp a un SQLite propio,
+y lo exporta como `.kgraph.json` para el visor 3D de
+[Node_visualizer](../Node_visualizer). `refresh.sh` re-ingesta todo
+idempotentemente.
+
+Ver los README/docstrings de cada subdirectorio para setup y detalles.

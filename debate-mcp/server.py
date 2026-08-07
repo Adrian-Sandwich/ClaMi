@@ -19,12 +19,28 @@ KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje"}
 # tope del long-poll: no tiene sentido esperar más que esto en una sola llamada
 MAX_WAIT_SECS = 300
 
+# Postgres trunca identifiers y channel names de NOTIFY a 63 bytes (NAMEDATALEN-1).
+# Un thread que empuje "debate_<thread>" sobre ese límite hace fallar el pg_notify
+# del trigger (y con él el INSERT completo) con "channel name too long". Cortamos
+# antes, con un mensaje claro, en vez de dejar que reviente adentro del trigger.
+_CHANNEL_PREFIX = "debate_"
+MAX_THREAD_LEN = 63 - len(_CHANNEL_PREFIX.encode())
+
 mcp = MCPServer("debate")
 
 
 def connect() -> psycopg.Connection:
     # autocommit: LISTEN no puede ir dentro de una transacción
     return psycopg.connect(CONNINFO, autocommit=True, row_factory=dict_row)
+
+
+def _validate_thread(thread: str) -> None:
+    n = len(thread.encode())
+    if n > MAX_THREAD_LEN:
+        raise ValueError(
+            f"thread {thread!r} tiene {n} bytes, máximo {MAX_THREAD_LEN} "
+            f"(el canal '{_CHANNEL_PREFIX}{thread}' se trunca en Postgres a 63 bytes)"
+        )
 
 
 @mcp.tool()
@@ -46,8 +62,18 @@ def list_threads() -> list[dict]:
 
 
 @mcp.tool()
-def read_thread(thread: str, since_id: int = 0, limit: int = 50) -> list[dict]:
-    """Lee mensajes de un thread con id > since_id, ordenados por id."""
+def read_thread(thread: str, since_id: int = 0, limit: int = 50) -> dict:
+    """Lee mensajes de un thread con id > since_id, ordenados por id.
+
+    Protocolo del debate: roles kimi/claude (analistas) y adrian (árbitro
+    humano). kinds en orden — analisis (apertura) -> critica -> respuesta ->
+    veredicto (cierre de cada analista); arbitraje solo lo postea adrian si
+    hay desacuerdo tras los veredictos.
+
+    Devuelve {"messages": [...], "has_more": bool, "max_id": int | None}.
+    Si has_more es true, llamá de nuevo con since_id=messages[-1]["id"] —
+    puede haber más mensajes de los que entraron en `limit`.
+    """
     with connect() as conn:
         rows = conn.execute(
             """
@@ -57,9 +83,14 @@ def read_thread(thread: str, since_id: int = 0, limit: int = 50) -> list[dict]:
             ORDER BY id
             LIMIT %s
             """,
-            (thread, since_id, limit),
+            (thread, since_id, limit + 1),
         ).fetchall()
-    return [_serialize(r) for r in rows]
+        max_id = conn.execute(
+            "SELECT max(id) AS m FROM messages WHERE thread = %s", (thread,)
+        ).fetchone()["m"]
+    has_more = len(rows) > limit
+    messages = [_serialize(r) for r in rows[:limit]]
+    return {"messages": messages, "has_more": has_more, "max_id": max_id}
 
 
 @mcp.tool()
@@ -69,11 +100,16 @@ def post_message(
     """Publica un mensaje en el thread y devuelve su id.
 
     El trigger de la tabla se encarga del NOTIFY a los listeners.
+
+    artifact es una referencia opcional al archivo/artefacto sobre el que
+    opina el mensaje (ej. "src/paper.rs:120" o "experiments/plan.md") — no
+    el contenido en sí, eso va en body.
     """
     if author not in AUTHORS:
         raise ValueError(f"author inválido: {author!r} (válidos: {sorted(AUTHORS)})")
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r} (válidos: {sorted(KINDS)})")
+    _validate_thread(thread)
     with connect() as conn:
         row = conn.execute(
             """
@@ -94,10 +130,11 @@ def wait_messages(thread: str, since_id: int, timeout_secs: int = 60) -> list[di
     thread o vence el timeout (capeado a 300s). Devuelve lista vacía si no
     llegó nada.
     """
+    _validate_thread(thread)
     timeout_secs = max(1, min(int(timeout_secs), MAX_WAIT_SECS))
     with connect() as conn:
         conn.execute(
-            sql.SQL("LISTEN {}").format(sql.Identifier(f"debate_{thread}"))
+            sql.SQL("LISTEN {}").format(sql.Identifier(f"{_CHANNEL_PREFIX}{thread}"))
         )
         # drenar lo que ya exista antes de bloquear (evita perder mensajes
         # que entraron entre el read_thread anterior y el LISTEN)
