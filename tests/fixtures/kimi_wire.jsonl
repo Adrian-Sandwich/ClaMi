@@ -1,0 +1,8 @@
+{"type":"metadata","time":1767225600000,"agent":"main"}
+{"type":"turn.prompt","time":1767225600000,"input":[{"type":"text","text":"revisá el ingestor de kimi"}]}
+{"type":"context.append_loop_event","time":1767225660000,"event":{"type":"tool.call","name":"read_file","args":{"path":"memory-graph/ingest_kimi.py"}}}
+{"type":"context.append_loop_event","time":1767225720000,"event":{"type":"tool.call","name":"edit_file","args":{"file_path":"/abs/otro.py"}}}
+linea corrupta que no es json
+{"type":"context.append_loop_event","time":1767225780000,"event":{"type":"tool.call","name":"post_message","args":{"thread":"hilo-uno","author":"kimi","kind":"critica"}}}
+{"type":"context.append_loop_event","time":1767225840000,"event":{"type":"content.part","text":"listo"}}
+{"type":"turn.prompt","time":1767225900000,"input":[{"type":"text","text":"segundo turno"}]}

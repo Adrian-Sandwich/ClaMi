@@ -1,0 +1,70 @@
+"""Los dos paquetes son scripts sueltos, no paquetes instalables: se importan
+por ruta. `settings` y `db` leen configuración de variables de entorno, así que
+todos los tests que tocan disco apuntan a un tmp_path — nunca a la memory.db
+real ni al Postgres real.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+sys.path.insert(0, str(REPO_ROOT / "memory-graph"))
+sys.path.insert(0, str(REPO_ROOT / "debate-mcp"))
+
+
+@pytest.fixture
+def graph_db(tmp_path, monkeypatch):
+    """Una memory.db vacía y descartable."""
+    import db as db_module
+    import settings
+
+    path = tmp_path / "memory.db"
+    monkeypatch.setattr(settings, "DB_PATH", path)
+    monkeypatch.setattr(db_module, "DB_PATH", path)
+    conn = db_module.connect(path)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def fixtures_dir() -> Path:
+    return FIXTURES
+
+
+@pytest.fixture
+def real_claude_logs() -> Path:
+    """Los transcripts de verdad. Los tests que los usan son el canario de
+    formato: si Claude Code cambia el shape del .jsonl, fallan acá."""
+    import settings
+
+    path = settings.CLAUDE_PROJECTS_DIR
+    if not path.exists() or not any(path.rglob("*.jsonl")):
+        pytest.skip(f"sin transcripts de Claude en {path}")
+    return path
+
+
+@pytest.fixture
+def real_kimi_logs() -> Path:
+    import settings
+
+    path = settings.KIMI_HOME / "sessions"
+    if not path.exists() or not any(path.glob("wd_*/session_*/agents/*/wire.jsonl")):
+        pytest.skip(f"sin wire.jsonl de Kimi en {path}")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _no_accidental_agent_spawn(monkeypatch):
+    """Red de seguridad: ningún test tiene por qué lanzar un `claude -p` real."""
+    import subprocess
+
+    def _boom(*a, **kw):
+        raise AssertionError(f"un test intentó lanzar un proceso: {a[:1]}")
+
+    monkeypatch.setattr(subprocess, "Popen", _boom, raising=True)
+    os.environ.setdefault("DEBATE_CONNINFO", "dbname=trade_debate user=adrianmedina host=localhost")

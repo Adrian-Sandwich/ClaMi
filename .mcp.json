@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "debate": {
+      "type": "stdio",
+      "command": "./debate-mcp/.venv/bin/python",
+      "args": ["./debate-mcp/server.py"],
+      "env": {}
+    }
+  }
+}

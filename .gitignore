@@ -1,6 +1,13 @@
 .venv/
 __pycache__/
+.pytest_cache/
 logs/
 relay_state.json
+relay_state.json.tmp
 memory.db*
 *.kgraph.json
+
+# backups que dejan install.sh y migrate_paths.py antes de tocar producción
+debate-mcp/launchd/backup/
+*.bak-*
+*.bak-original

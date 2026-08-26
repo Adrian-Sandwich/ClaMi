@@ -1,0 +1,7 @@
+{"type":"user","sessionId":"SESSION-A","cwd":"/tmp/fake-repo","timestamp":"2026-01-01T00:00:00Z","message":{"content":"arreglá el parser"}}
+{"type":"ai-title","sessionId":"SESSION-A","aiTitle":"Arreglo del parser"}
+{"type":"assistant","sessionId":"SESSION-A","timestamp":"2026-01-01T00:01:00Z","message":{"content":[{"type":"text","text":"voy"},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/fake-repo/a.py"}}]}}
+{"type":"assistant","sessionId":"SESSION-A","timestamp":"2026-01-01T00:02:00Z","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/fake-repo/a.py"}},{"type":"tool_use","name":"NotebookEdit","input":{"notebook_path":"/tmp/fake-repo/nb.ipynb"}}]}}
+esto no es json y tiene que contarse como bad_line
+{"type":"assistant","sessionId":"SESSION-A","timestamp":"2026-01-01T00:03:00Z","message":{"content":[{"type":"tool_use","name":"mcp__debate__post_message","input":{"thread":"hilo-uno","author":"claude","kind":"analisis","body":"x"}}]}}
+{"type":"summary","sessionId":"SESSION-A","summary":"no cuenta como turno"}
