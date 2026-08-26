@@ -6,12 +6,15 @@ Postgres: cada INSERT dispara pg_notify('debate_<thread>', id), así que
 `wait_messages` puede hacer LISTEN y despertar apenas llega un mensaje nuevo.
 """
 
-import psycopg
-from mcp.server import MCPServer
-from psycopg import sql
-from psycopg.rows import dict_row
+import sys
+from pathlib import Path
 
-CONNINFO = "dbname=trade_debate user=adrianmedina host=localhost"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mcp.server import MCPServer  # noqa: E402
+from psycopg import sql  # noqa: E402
+
+from config import connect  # noqa: E402
 
 AUTHORS = {"kimi", "claude", "adrian"}
 KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje"}
@@ -27,11 +30,6 @@ _CHANNEL_PREFIX = "debate_"
 MAX_THREAD_LEN = 63 - len(_CHANNEL_PREFIX.encode())
 
 mcp = MCPServer("debate")
-
-
-def connect() -> psycopg.Connection:
-    # autocommit: LISTEN no puede ir dentro de una transacción
-    return psycopg.connect(CONNINFO, autocommit=True, row_factory=dict_row)
 
 
 def _validate_thread(thread: str) -> None:
@@ -74,22 +72,32 @@ def read_thread(thread: str, since_id: int = 0, limit: int = 50) -> dict:
     Si has_more es true, llamá de nuevo con since_id=messages[-1]["id"] —
     puede haber más mensajes de los que entraron en `limit`.
     """
+    # El LEFT JOIN LATERAL trae la página y el max_id del thread en un solo
+    # roundtrip. Es LEFT y no un CTE con join normal a propósito: cuando no
+    # hay mensajes nuevos igual queremos devolver el max_id real del thread,
+    # y un join interno no devolvería ninguna fila.
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, thread, author, kind, body, artifact, created_at
-            FROM messages
-            WHERE thread = %s AND id > %s
-            ORDER BY id
-            LIMIT %s
+            SELECT m.max_id, t.id, t.thread, t.author, t.kind, t.body,
+                   t.artifact, t.created_at
+            FROM (SELECT max(id) AS max_id FROM messages WHERE thread = %s) m
+            LEFT JOIN LATERAL (
+                SELECT id, thread, author, kind, body, artifact, created_at
+                FROM messages
+                WHERE thread = %s AND id > %s
+                ORDER BY id
+                LIMIT %s
+            ) t ON true
+            ORDER BY t.id
             """,
-            (thread, since_id, limit + 1),
+            (thread, thread, since_id, limit + 1),
         ).fetchall()
-        max_id = conn.execute(
-            "SELECT max(id) AS m FROM messages WHERE thread = %s", (thread,)
-        ).fetchone()["m"]
-    has_more = len(rows) > limit
-    messages = [_serialize(r) for r in rows[:limit]]
+
+    max_id = rows[0]["max_id"] if rows else None
+    found = [r for r in rows if r["id"] is not None]
+    has_more = len(found) > limit
+    messages = [_serialize(r) for r in found[:limit]]
     return {"messages": messages, "has_more": has_more, "max_id": max_id}
 
 
