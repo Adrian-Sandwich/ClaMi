@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Aplica las migraciones .sql de este directorio, en orden, una sola vez.
 
-La DB `trade_debate` se había creado a mano: el DDL no vivía en ningún
-archivo, así que el tablero no era reproducible desde el código. Esto lo
+La base se había creado a mano: el DDL no vivía en ningún archivo, así que
+el tablero no era reproducible desde el código. Esto lo
 arregla sin traer Alembic para una tabla — archivos numerados y una tabla
 `schema_version` que registra cuáles ya corrieron.
 

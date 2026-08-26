@@ -1,9 +1,9 @@
 -- Esquema base del tablero de debate.
 --
--- Escrito a partir del DDL que ya existía en la DB `trade_debate` (creada a
--- mano en su momento). Todo es idempotente a propósito: aplicar esta
--- migración sobre la base viva tiene que ser un no-op, y sobre una base
--- vacía tiene que reconstruir el tablero entero.
+-- Escrito a partir del DDL que ya existía en la base (creada a mano en su
+-- momento, cuando todavía se llamaba `trade_debate`). Todo es idempotente a
+-- propósito: aplicar esta migración sobre la base viva tiene que ser un no-op,
+-- y sobre una base vacía tiene que reconstruir el tablero entero.
 
 CREATE TABLE IF NOT EXISTS messages (
     id         bigserial PRIMARY KEY,

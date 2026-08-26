@@ -67,4 +67,4 @@ def _no_accidental_agent_spawn(monkeypatch):
         raise AssertionError(f"un test intentó lanzar un proceso: {a[:1]}")
 
     monkeypatch.setattr(subprocess, "Popen", _boom, raising=True)
-    os.environ.setdefault("DEBATE_CONNINFO", "dbname=trade_debate user=adrianmedina host=localhost")
+    os.environ.setdefault("DEBATE_CONNINFO", "dbname=debate user=adrianmedina host=localhost")

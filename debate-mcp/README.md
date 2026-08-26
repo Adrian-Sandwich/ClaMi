@@ -80,7 +80,7 @@ vía launchd y avisa por notificación de macOS. Exit code 0/1/2.
 
 | Variable | Default |
 |---|---|
-| `DEBATE_CONNINFO` | `dbname=trade_debate user=adrianmedina host=localhost` |
+| `DEBATE_CONNINFO` | `dbname=debate user=adrianmedina host=localhost` |
 | `DEBATE_CLAUDE_BIN` | `~/.local/bin/claude` |
 | `DEBATE_KIMI_BIN` | `~/.kimi-code/bin/kimi` |
 | `DEBATE_DEFAULT_CWD` | la raíz de este monorepo |

@@ -10,7 +10,7 @@ import os
 import psycopg
 from psycopg.rows import dict_row
 
-DEFAULT_CONNINFO = "dbname=trade_debate user=adrianmedina host=localhost"
+DEFAULT_CONNINFO = "dbname=debate user=adrianmedina host=localhost"
 CONNINFO = os.environ.get("DEBATE_CONNINFO", DEFAULT_CONNINFO)
 
 

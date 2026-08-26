@@ -17,7 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Postgres (tablero de debate) ---------------------------------------
-DEFAULT_CONNINFO = "dbname=trade_debate user=adrianmedina host=localhost"
+DEFAULT_CONNINFO = "dbname=debate user=adrianmedina host=localhost"
 CONNINFO = os.environ.get("DEBATE_CONNINFO", DEFAULT_CONNINFO)
 
 # --- SQLite propio -------------------------------------------------------

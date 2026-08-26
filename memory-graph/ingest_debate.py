@@ -1,4 +1,4 @@
-"""Nodos debate_thread desde Postgres trade_debate. No crea edges — las
+"""Nodos debate_thread desde la base `debate` de Postgres. No crea edges — las
 crean ingest_claude/ingest_kimi/ingest_docs referenciando debate_thread:<name>
 por natural key (no importa el orden de ingestión, finalize() en
 export_kgraph.py tira los edges que queden colgando)."""

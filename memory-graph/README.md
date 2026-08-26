@@ -34,7 +34,7 @@ Todo sale de `settings.py` y se puede pisar por entorno:
 
 | Variable | Default |
 |---|---|
-| `DEBATE_CONNINFO` | `dbname=trade_debate user=adrianmedina host=localhost` |
+| `DEBATE_CONNINFO` | `dbname=debate user=adrianmedina host=localhost` |
 | `MEMORY_GRAPH_DB` | `./memory.db` |
 | `NODE_VISUALIZER_DIR` | `../../Node_visualizer` |
 | `MEMORY_GRAPH_OUT` | `$NODE_VISUALIZER_DIR/graphs/memory.kgraph.json` |

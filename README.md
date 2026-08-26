@@ -42,9 +42,10 @@ Estado del sistema en cualquier momento:
 
 ## Notas de operación
 
-- La base se llama `trade_debate` por razones históricas: el tablero arrancó
-  para el proyecto de trading y hoy es de propósito general. Renombrarla está
-  pendiente.
+- La base se llama `debate`. Hasta agosto de 2026 se llamaba `trade_debate`,
+  de cuando el tablero arrancó para el proyecto de trading; hoy es de propósito
+  general y el nombre viejo confundía. Si tenés un checkout que todavía apunta
+  al anterior, pisá el default con `DEBATE_CONNINFO`.
 - Los `test_canary_*` corren contra los logs reales de `~/.claude` y
   `~/.kimi-code`, y fallan cuando el formato de esos logs cambia. Es a
   propósito: son el detector de drift de los ingestors.
