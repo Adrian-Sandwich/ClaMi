@@ -7,7 +7,9 @@ un nodo `file:` genérico cuando el proyecto sí está indexado."""
 import sqlite3
 from pathlib import Path
 
-CACHE_DIR = Path.home() / ".cache" / "codebase-memory-mcp"
+import settings
+
+CACHE_DIR = settings.CODE_CACHE_DIR
 
 
 class CodeIndex:

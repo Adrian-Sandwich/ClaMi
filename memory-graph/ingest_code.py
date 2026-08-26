@@ -27,7 +27,7 @@ def code_node_id(project: str, qualified_name: str) -> str:
     return f"code:{project}:{qualified_name}"
 
 
-def ingest_project_db(conn, db_path) -> tuple[int, int]:
+def ingest_project_db(conn, db_path, seen: set[str]) -> tuple[int, int]:
     now = datetime.now(timezone.utc).isoformat()
     src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
@@ -49,6 +49,7 @@ def ingest_project_db(conn, db_path) -> tuple[int, int]:
     n_nodes = 0
     for r in nodes:
         id_to_qn[r["id"]] = r["qualified_name"]
+        seen.add(code_node_id(project, r["qualified_name"]))
         props = json.loads(r["properties"] or "{}")
         props.update({
             "file_path": r["file_path"],
@@ -98,17 +99,21 @@ def ingest_project_db(conn, db_path) -> tuple[int, int]:
 
 def main() -> None:
     conn = db.connect()
+    seen: set[str] = set()
     total_nodes = total_edges = 0
     for db_path in sorted(CACHE_DIR.glob("*.db")):
         if db_path.stem == "_config":
             continue
-        n_nodes, n_edges = ingest_project_db(conn, db_path)
+        n_nodes, n_edges = ingest_project_db(conn, db_path, seen)
         print(f"[ingest_code] {db_path.stem}: {n_nodes} nodos, {n_edges} edges")
         total_nodes += n_nodes
         total_edges += n_edges
+    # Un proyecto reindexado pierde funciones que ya no existen, y uno
+    # borrado del cache desaparece entero: sin esto quedaban para siempre.
+    n_swept = db.sweep_domain(conn, "code", seen)
     conn.commit()
     conn.close()
-    print(f"[ingest_code] total: {total_nodes} nodos, {total_edges} edges")
+    print(f"[ingest_code] total: {total_nodes} nodos, {total_edges} edges, {n_swept} borrados")
 
 
 if __name__ == "__main__":

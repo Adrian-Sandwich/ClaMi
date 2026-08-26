@@ -9,8 +9,9 @@ import psycopg
 from psycopg.rows import dict_row
 
 import db
+import settings
 
-CONNINFO = "dbname=trade_debate user=adrianmedina host=localhost"
+CONNINFO = settings.CONNINFO
 SOURCE = "ingest_debate"
 
 
@@ -39,8 +40,10 @@ def main() -> None:
             """
         ).fetchall()
 
+    seen: set[str] = set()
     n = 0
     for r in rows:
+        seen.add(node_id(r["thread"]))
         db.upsert_node(
             conn,
             id=node_id(r["thread"]),
@@ -61,9 +64,10 @@ def main() -> None:
         )
         n += 1
 
+    n_swept = db.sweep_domain(conn, "debate_thread", seen)
     conn.commit()
     conn.close()
-    print(f"[ingest_debate] {n} threads")
+    print(f"[ingest_debate] {n} threads, {n_swept} borrados")
 
 
 if __name__ == "__main__":

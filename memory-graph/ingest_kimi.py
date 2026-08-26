@@ -4,11 +4,14 @@ No confía en session_index.jsonl como enumeración (se vio desactualizado —
 caminando los directorios reales y resuelve el proyecto vía workspaces.json.
 
 Nota de compatibilidad: distintas versiones de kimi-code escriben distinto
-wire.jsonl. Versiones viejas tienen eventos `tool.call` explícitos (source de
-los edges touched/posted_to); la build actual (0.34.0, verificado en vivo)
-no los emite en este log — solo turn.prompt/content.part. El ingestor soporta
-ambos formatos pero en sesiones nuevas puede no haber edges touched/posted_to,
-solo el nodo de sesión con label/timestamps. Documentado, no es un bug."""
+wire.jsonl, y el ingestor tolera ambos formatos. Hubo una nota acá diciendo
+que la build 0.34.0 había dejado de emitir eventos `tool.call` — al 2026-08-26
+eso ya NO es cierto: sobre los 75 wire.jsonl del disco hay 1900 `tool.call`
+(1032 con path, 144 con thread) y 193 `turn.prompt`, con sólo 2 de 75 archivos
+sin prompts. La nota vieja envejeció en silencio y se dio por buena durante
+semanas. Por eso el chequeo ahora vive en `tests/test_parsers.py`, que corre
+contra los logs reales y falla si un evento desaparece — en vez de en un
+comentario que nadie revalida."""
 
 import json
 from datetime import datetime, timezone
@@ -16,11 +19,13 @@ from pathlib import Path
 
 import db
 import ingest_debate
+import settings
 from code_lookup import CodeIndex
-from ingest_claude import FILE_PATH_KEYS, project_id, resolve_file_node
+from ingest_claude import project_id, resolve_file_node
+from jsonl_facts import Facts, merge_facts, read_jsonl
 
 SOURCE = "ingest_kimi"
-KIMI_HOME = Path.home() / ".kimi-code"
+KIMI_HOME = settings.KIMI_HOME
 SESSIONS_DIR = KIMI_HOME / "sessions"
 
 
@@ -34,76 +39,43 @@ def kimi_session_id(sid: str) -> str:
 
 
 def extract_agent_facts(path: Path) -> dict:
+    """Dialecto de kimi-code: los turnos son eventos `turn.prompt` con el texto
+    en `input`, y las llamadas a herramientas van envueltas en
+    `context.append_loop_event` -> `event.type == "tool.call"`. El timestamp es
+    `time`, en milisegundos epoch (Claude usa ISO en `timestamp`)."""
+    facts = Facts()
     first_prompt = None
-    n_turns = 0
-    first_ts = last_ts = None
-    touched: dict[str, int] = {}
-    threads: set[str] = set()
-    n_bad_lines = 0
 
-    with path.open(errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                n_bad_lines += 1
-                continue
+    for d in read_jsonl(path, facts):
+        facts.observe_ts(d.get("time"))
 
-            ts = d.get("time")
-            if ts:
-                first_ts = first_ts if first_ts is not None else ts
-                last_ts = ts
-
-            t = d.get("type")
-            if t == "turn.prompt":
-                n_turns += 1
-                if first_prompt is None:
-                    for block in d.get("input", []) or []:
-                        if block.get("type") == "text":
-                            first_prompt = block["text"]
-                            break
-                continue
-
-            if t != "context.append_loop_event":
-                continue
-            ev = d.get("event", {})
-            et = ev.get("type")
-            if et == "tool.call":
-                # formato viejo de kimi-code; puede no existir en builds nuevas
-                name = ev.get("name", "")
-                args = ev.get("args", {}) or {}
-                for key in FILE_PATH_KEYS:
-                    if key in args:
-                        touched[args[key]] = touched.get(args[key], 0) + 1
+        t = d.get("type")
+        if t == "turn.prompt":
+            facts.n_turns += 1
+            if first_prompt is None:
+                for block in d.get("input", []) or []:
+                    if block.get("type") == "text":
+                        first_prompt = block["text"]
                         break
-                if name in ("post_message", "read_thread", "wait_messages") and "thread" in args:
-                    threads.add(args["thread"])
+            continue
 
-    return {
-        "first_prompt": first_prompt, "n_turns": n_turns,
-        "first_ts": first_ts, "last_ts": last_ts,
-        "touched": touched, "threads": threads, "bad_lines": n_bad_lines,
-    }
+        if t != "context.append_loop_event":
+            continue
+        ev = d.get("event", {})
+        if ev.get("type") != "tool.call":
+            continue
+
+        args = ev.get("args") or {}
+        facts.touch_from(args)
+        if ev.get("name") in ("post_message", "read_thread", "wait_messages") and "thread" in args:
+            facts.note_thread(args["thread"])
+
+    return facts.as_dict(first_prompt=first_prompt)
 
 
 def merge(facts_list: list[dict]) -> dict:
-    m = {"first_prompt": None, "n_turns": 0, "first_ts": None, "last_ts": None,
-         "touched": {}, "threads": set(), "bad_lines": 0}
-    for f in facts_list:
-        m["first_prompt"] = m["first_prompt"] or f["first_prompt"]
-        m["n_turns"] += f["n_turns"]
-        m["bad_lines"] += f["bad_lines"]
-        if f["first_ts"] and (m["first_ts"] is None or f["first_ts"] < m["first_ts"]):
-            m["first_ts"] = f["first_ts"]
-        if f["last_ts"] and (m["last_ts"] is None or f["last_ts"] > m["last_ts"]):
-            m["last_ts"] = f["last_ts"]
-        for p, c in f["touched"].items():
-            m["touched"][p] = m["touched"].get(p, 0) + c
-        m["threads"] |= f["threads"]
-    return m
+    """Kimi guarda un wire.jsonl por agente dentro de la misma sesión."""
+    return merge_facts(facts_list, first_wins=("first_prompt",))
 
 
 def epoch_ms_to_iso(ms) -> str | None:
@@ -118,7 +90,9 @@ def main() -> None:
     code_index = CodeIndex()
     workspaces = load_workspaces()
 
-    n_sessions = 0
+    seen_sessions: set[str] = set()
+    seen_paths: set[str] = set()
+    n_sessions = n_cached = 0
     for workspace_dir in SESSIONS_DIR.glob("wd_*"):
         cwd = workspaces.get(workspace_dir.name)
         if not cwd:
@@ -128,13 +102,24 @@ def main() -> None:
             wire_files = list(session_dir.glob("agents/*/wire.jsonl"))
             if not wire_files:
                 continue
-            facts_list = [extract_agent_facts(p) for p in wire_files]
+
+            facts_list = []
+            for wire in wire_files:
+                seen_paths.add(str(wire))
+                facts = db.cached_facts(conn, SOURCE, wire)
+                if facts is not None:
+                    n_cached += 1
+                else:
+                    facts = extract_agent_facts(wire)
+                    db.store_facts(conn, SOURCE, wire, facts)
+                facts_list.append(facts)
             m = merge(facts_list)
 
             pid = project_id(cwd)
             db.upsert_node(conn, id=pid, domain="project", source=SOURCE, updated_at=now, label=Path(cwd).name, tag="Project")
 
             sid_node = kimi_session_id(sid)
+            seen_sessions.add(sid_node)
             label = m["first_prompt"][:80] if m["first_prompt"] else sid
             db.upsert_node(
                 conn, id=sid_node, domain="kimi_session", source=SOURCE, updated_at=now,
@@ -161,10 +146,13 @@ def main() -> None:
 
             n_sessions += 1
 
+    n_swept = db.sweep_domain(conn, "kimi_session", seen_sessions)
+    db.forget_missing_files(conn, SOURCE, seen_paths)
+
     code_index.close()
     conn.commit()
     conn.close()
-    print(f"[ingest_kimi] {n_sessions} sesiones")
+    print(f"[ingest_kimi] {n_sessions} sesiones ({n_cached} archivos sin cambios), {n_swept} borradas")
 
 
 if __name__ == "__main__":

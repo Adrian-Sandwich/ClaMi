@@ -1,12 +1,23 @@
 """Store compartido del grafo de memoria: nodos/edges en SQLite, natural-key
 upsert para que correr los ingestors dos veces sea un no-op sobre el contenido.
+
+Además de nodos y edges hay dos tablas de servicio:
+
+- `file_cache`: los hechos ya extraídos de cada archivo de log, con su mtime y
+  tamaño. Antes cada corrida de `refresh.sh` re-parseaba TODOS los `.jsonl` de
+  Claude y Kimi desde cero, cosa que crece lineal con el histórico. Ahora sólo
+  se re-parsea lo que cambió; el resto se lee de acá.
+- `sweep_domain()`: el grafo sólo sabía crecer. `reset_source_edges()` limpiaba
+  los edges salientes de una entidad, pero los NODOS de sesiones, docs o
+  proyectos borrados quedaban para siempre. Ahora cada ingestor declara qué vio
+  y lo que no aparece se borra.
 """
 
 import json
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "memory.db"
+from settings import DB_PATH  # noqa: F401  (re-exportado: db.DB_PATH era la API previa)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -36,11 +47,20 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
+
+CREATE TABLE IF NOT EXISTS file_cache (
+    source TEXT NOT NULL,
+    path TEXT NOT NULL,
+    mtime REAL NOT NULL,
+    size INTEGER NOT NULL,
+    facts TEXT NOT NULL,
+    PRIMARY KEY (source, path)
+);
 """
 
 
-def connect(path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(path or DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
@@ -110,3 +130,89 @@ def reset_source_edges(conn: sqlite3.Connection, source: str, from_id: str) -> N
     viejos de ese mismo source/from_id — evita doble-conteo de weight al
     re-correr el ingestor sobre la misma sesión/doc."""
     conn.execute("DELETE FROM edges WHERE source = ? AND from_id = ?", (source, from_id))
+
+
+# ------------------------------------------------------------ cache de archivos
+
+def cached_facts(conn: sqlite3.Connection, source: str, path: Path) -> dict | None:
+    """Hechos ya extraídos de este archivo, si sigue igual que la última vez.
+
+    La clave es (mtime, size). Los logs de sesión son append-only, así que un
+    archivo con el mismo mtime y tamaño tiene exactamente el mismo contenido.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    row = conn.execute(
+        "SELECT mtime, size, facts FROM file_cache WHERE source = ? AND path = ?",
+        (source, str(path)),
+    ).fetchone()
+    if not row:
+        return None
+    mtime, size, facts = row
+    if mtime != st.st_mtime or size != st.st_size:
+        return None
+    return json.loads(facts)
+
+
+def store_facts(conn: sqlite3.Connection, source: str, path: Path, facts: dict) -> None:
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    conn.execute(
+        """
+        INSERT INTO file_cache (source, path, mtime, size, facts)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source, path) DO UPDATE SET
+            mtime=excluded.mtime, size=excluded.size, facts=excluded.facts
+        """,
+        (source, str(path), st.st_mtime, st.st_size, json.dumps(facts)),
+    )
+
+
+def forget_missing_files(conn: sqlite3.Connection, source: str, seen: set[str]) -> int:
+    """Saca del cache los archivos que ya no están en disco."""
+    rows = conn.execute("SELECT path FROM file_cache WHERE source = ?", (source,)).fetchall()
+    gone = [(source, p) for (p,) in rows if p not in seen]
+    conn.executemany("DELETE FROM file_cache WHERE source = ? AND path = ?", gone)
+    return len(gone)
+
+
+# ------------------------------------------------------------ recolección
+
+def sweep_domain(conn: sqlite3.Connection, domain: str, seen: set[str]) -> int:
+    """Borra los nodos de un dominio que este ingestor ya no produce, junto con
+    sus edges. Se pasa el dominio y no el `source` a propósito: un mismo nodo
+    (típicamente un `project:`) lo escriben varios ingestors y el último gana
+    la columna `source`, así que barrer por source borraría cosas vivas. Los
+    dominios sí son exclusivos de un ingestor."""
+    rows = conn.execute("SELECT id FROM nodes WHERE domain = ?", (domain,)).fetchall()
+    stale = [(r[0],) for r in rows if r[0] not in seen]
+    if not stale:
+        return 0
+    conn.executemany("DELETE FROM nodes WHERE id = ?", stale)
+    conn.executemany("DELETE FROM edges WHERE from_id = ?", stale)
+    conn.executemany("DELETE FROM edges WHERE to_id = ?", stale)
+    return len(stale)
+
+
+def gc_orphans(conn: sqlite3.Connection, domains: tuple[str, ...] = ("file", "project")) -> int:
+    """Nodos derivados que quedaron sin ninguna arista. Un `file:` sólo existe
+    porque alguna sesión lo tocó; si esa sesión se barrió, el archivo ya no
+    tiene por qué estar en el grafo."""
+    placeholders = ",".join("?" for _ in domains)
+    rows = conn.execute(
+        f"""
+        SELECT id FROM nodes
+        WHERE domain IN ({placeholders})
+          AND id NOT IN (SELECT from_id FROM edges)
+          AND id NOT IN (SELECT to_id FROM edges)
+        """,
+        domains,
+    ).fetchall()
+    if not rows:
+        return 0
+    conn.executemany("DELETE FROM nodes WHERE id = ?", [(r[0],) for r in rows])
+    return len(rows)

@@ -1,16 +1,28 @@
 """Vuelca memory.db a Node_visualizer/graphs/memory.kgraph.json, pasando por
 finalize() del contrato (dedupe, tira edges colgantes, recalcula counts) en
-vez de reimplementar esa validación acá."""
+vez de reimplementar esa validación acá.
+
+La ruta al visor sale de `settings` (env `NODE_VISUALIZER_DIR`): estaba escrita
+literal acá, así que mover o clonar Node_visualizer rompía la exportación con
+un ImportError sin explicación.
+"""
 
 import json
 import sys
 from pathlib import Path
 
 import db
+import settings
 
-NODE_VISUALIZER = Path("/Users/adrianmedina/src/Node_visualizer")
-OUT_PATH = NODE_VISUALIZER / "graphs" / "memory.kgraph.json"
+NODE_VISUALIZER = settings.NODE_VISUALIZER
+OUT_PATH = settings.KGRAPH_OUT
 TOOLTIP_MAX = 200
+
+if not (NODE_VISUALIZER / "kgraph_contract.py").exists():
+    raise SystemExit(
+        f"[export_kgraph] no encuentro kgraph_contract.py en {NODE_VISUALIZER}. "
+        f"Apuntá NODE_VISUALIZER_DIR al checkout de Node_visualizer."
+    )
 
 sys.path.insert(0, str(NODE_VISUALIZER))
 from kgraph_contract import finalize  # noqa: E402
@@ -64,7 +76,7 @@ def main() -> None:
     }
     finalize(obj)
 
-    OUT_PATH.parent.mkdir(exist_ok=True)
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(obj))
 
     print(f"[export_kgraph] {len(obj['nodes'])} nodos, {len(obj['edges'])} edges -> {OUT_PATH}")
