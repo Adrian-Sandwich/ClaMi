@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Re-ingesta del grafo de memoria, cada hora.
+
+  Antes no estaba agendado en ningún lado: había que acordarse de correr
+  refresh.sh a mano. Resultado medido el 2026-08-26: memory.db con 19 días de
+  atraso, 15 sesiones de Kimi cargadas contra 75 archivos en disco, 4 threads
+  de debate contra 9 en Postgres. El grafo mostraba menos de la mitad de lo
+  que había pasado, sin ninguna señal de estar desactualizado.
+
+  Con el cache incremental (db.file_cache) una corrida sin cambios cuesta unos
+  segundos, así que cada hora es barato.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adrianmedina.clami-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adrianmedina/src/ClaMi/memory-graph/refresh.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adrianmedina/src/ClaMi/memory-graph</string>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adrianmedina/src/ClaMi/debate-mcp/logs/refresh.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/adrianmedina/src/ClaMi/debate-mcp/logs/refresh.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Chequeo de salud cada 15 minutos, con notificación de macOS si algo está mal.
+
+  Existe porque los dos componentes del sistema ya fallaron ESTANDO "arriba":
+  Postgres caído con el relay vivo escupiendo errores al log, y el grafo con 19
+  días de atraso. Nadie se enteró en ninguno de los dos casos. `--quiet` hace
+  que no imprima nada cuando todo está bien, así que el log sólo tiene ruido
+  cuando hay algo que mirar.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adrianmedina.clami-healthcheck</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/adrianmedina/src/ClaMi/debate-mcp/.venv/bin/python</string>
+        <string>/Users/adrianmedina/src/ClaMi/debate-mcp/healthcheck.py</string>
+        <string>--quiet</string>
+        <string>--notify</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/adrianmedina/src/ClaMi/debate-mcp</string>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adrianmedina/src/ClaMi/debate-mcp/logs/healthcheck.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/adrianmedina/src/ClaMi/debate-mcp/logs/healthcheck.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

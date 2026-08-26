@@ -1,35 +1,87 @@
 #!/usr/bin/env python3
 """Daemon relay: cierra el loop de comunicación entre Kimi y Claude en el
-tablero 'debate'. Antes, alguien tenía que disparar a mano un `claude -p` o
-`kimi -p` por cada ronda. Este proceso hace polling de la tabla `messages` y,
-cuando un autor postea, dispara automáticamente al otro para que responda.
+tablero 'debate'. Cuando un autor postea, dispara automáticamente al otro
+para que responda, hasta que el thread cierra con veredictos cruzados o
+arbitraje.
 
-Regla de cierre: si los dos últimos mensajes de un thread son 'veredicto' de
-autores distintos, o el último es 'arbitraje', el thread queda cerrado (no se
-dispara más) hasta que aparezca un nuevo 'analisis'.
+Lo que aprendimos de la versión anterior, en el debate 'clami-mejoras' y
+viéndolo fallar en vivo el 2026-08-26:
+
+- Hacía `time.sleep(20)` contra una base que ya empuja eventos por
+  LISTEN/NOTIFY. Ahora escucha el canal `debate_all` (migración 002) y
+  despierta al instante, con un wake ocioso cada IDLE_WAKE_SECS que además
+  refresca el heartbeat.
+- Disparaba un proceso POR CADA fila nueva. Si dos agentes posteaban casi a
+  la vez (o si el relay volvía de estar caído con backlog), salían N procesos
+  concurrentes sobre el mismo thread y el debate se duplicaba en cada ronda:
+  el thread 'clami-mejoras' generó 15 mensajes de más así. Ahora se colapsa a
+  UN disparo por thread, por el último mensaje, y hay un candado de
+  in-flight por thread.
+- No tenía tope de rondas: dos analistas que nunca posteen 'veredicto' lo
+  hacían disparar para siempre. Y como los agentes corren con permiso de
+  escritura en un cwd real, eso no es sólo gasto de tokens: es radio de daño.
+  Ahora hay MAX_TRIGGERS_PER_THREAD, que se resetea con cada 'analisis'.
+- Hacía Popen y se olvidaba: procesos zombie, y un agente colgado quedaba
+  colgado para siempre. Ahora se espera con timeout, se mata el grupo de
+  procesos si se pasa, y se registra exit code y duración.
+- Avanzaba el watermark antes de saber si el disparo había salido. Si el
+  binario no estaba, ese turno se perdía sin reintento. Ahora lo que no llegó
+  a spawnear queda en `pending` y se reintenta en el ciclo siguiente.
+- Corría todo con cwd fijo en el repo de trading, aunque el debate fuera de
+  otro proyecto. Ahora el cwd sale del campo `artifact` del thread.
 """
 
 import json
 import logging
+import os
+import re
+import signal
 import subprocess
+import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-import psycopg
-from psycopg.rows import dict_row
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-CONNINFO = "dbname=trade_debate user=adrianmedina host=localhost"
-POLL_SECS = 20
-STATE_PATH = Path(__file__).parent / "relay_state.json"
-LOG_DIR = Path(__file__).parent / "logs"
+import psycopg  # noqa: E402
+
+from config import connect  # noqa: E402
+
+BASE_DIR = Path(__file__).resolve().parent
+STATE_PATH = BASE_DIR / "relay_state.json"
+LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
+HEARTBEAT_PATH = LOG_DIR / "relay_heartbeat.json"
+EVENTS_PATH = LOG_DIR / "trigger_events.jsonl"
 
-CLAUDE_BIN = "/Users/adrianmedina/.local/bin/claude"
-KIMI_BIN = "/Users/adrianmedina/.kimi-code/bin/kimi"
+CHANNEL_ALL = "debate_all"
 
-# cwd por thread; default cubre el caso más común (debate sobre el proyecto trade)
-DEFAULT_CWD = "/Users/adrianmedina/src/trade"
-THREAD_CWD = {}
+# Sin notify, despertamos igual cada tanto: refresca el heartbeat y reintenta
+# lo que haya quedado en `pending`.
+IDLE_WAKE_SECS = 300
+MAX_BACKOFF_SECS = 300
+
+# Tope de disparos por thread entre un 'analisis' y el siguiente. Un debate de
+# 3 rondas gasta ~6; 12 deja margen para idas y vueltas sin dejar que un loop
+# critica<->respuesta corra indefinidamente.
+MAX_TRIGGERS_PER_THREAD = 12
+
+# Un agente que no terminó en 15 minutos está colgado.
+AGENT_TIMEOUT_SECS = 900
+
+# Techo global, por si hay varios threads activos a la vez.
+MAX_CONCURRENT_TRIGGERS = 4
+
+CLAUDE_BIN = os.environ.get("DEBATE_CLAUDE_BIN", "/Users/adrianmedina/.local/bin/claude")
+KIMI_BIN = os.environ.get("DEBATE_KIMI_BIN", "/Users/adrianmedina/.kimi-code/bin/kimi")
+
+# Último recurso cuando el thread no dice sobre qué proyecto opina.
+DEFAULT_CWD = os.environ.get("DEBATE_DEFAULT_CWD", str(BASE_DIR.parent))
+
+# Override manual, gana sobre el artifact.
+THREAD_CWD: dict[str, str] = {}
 
 PROTOCOL = """Roles: kimi y claude (analistas), adrian (arbitro humano).
 Kinds: analisis (apertura), critica, respuesta, veredicto (cierre de cada
@@ -47,20 +99,115 @@ logging.basicConfig(
 )
 log = logging.getLogger("relay")
 
+# threads con un disparo corriendo ahora mismo
+_inflight: set[str] = set()
+_inflight_lock = threading.Lock()
 
-def connect():
-    return psycopg.connect(CONNINFO, autocommit=True, row_factory=dict_row)
+_RE_LINE_SUFFIX = re.compile(r":\d+$")
 
 
-def load_state():
+# ---------------------------------------------------------------- estado
+
+def load_state() -> dict:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
-    return {"last_id": 0}
+        state = json.loads(STATE_PATH.read_text())
+    else:
+        state = {}
+    state.setdefault("last_id", 0)
+    state.setdefault("threads", {})
+    state.setdefault("pending", [])
+    return state
 
 
-def save_state(state):
-    STATE_PATH.write_text(json.dumps(state))
+def save_state(state: dict) -> None:
+    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=1))
+    tmp.replace(STATE_PATH)
 
+
+def thread_state(state: dict, thread: str) -> dict:
+    ts = state["threads"].setdefault(thread, {})
+    ts.setdefault("triggers", 0)
+    ts.setdefault("cwd", None)
+    return ts
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def event(kind: str, **fields) -> None:
+    """Una línea JSON por evento. Es lo que hace medible al relay: cuántos
+    disparos, cuánto tardan, cuántos fallan. `healthcheck.py` lee esto."""
+    rec = {"ts": now_iso(), "event": kind, **fields}
+    with EVENTS_PATH.open("a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def write_heartbeat(state: dict, pg_ok: bool) -> None:
+    """Latido en disco. launchd ya reinicia el proceso si muere, pero no sabe
+    distinguir 'vivo' de 'vivo y roto' — que fue exactamente el estado del
+    relay mientras Postgres estuvo caído: proceso arriba, loop escupiendo
+    OperationalError cada 20s, nadie enterado."""
+    with _inflight_lock:
+        inflight = sorted(_inflight)
+    HEARTBEAT_PATH.write_text(json.dumps({
+        "ts": now_iso(),
+        "pid": os.getpid(),
+        "pg_ok": pg_ok,
+        "last_id": state["last_id"],
+        "inflight": inflight,
+        "pending": len(state["pending"]),
+        "capped_threads": sorted(
+            t for t, ts in state["threads"].items()
+            if ts.get("triggers", 0) >= MAX_TRIGGERS_PER_THREAD
+        ),
+    }, indent=1))
+
+
+# ---------------------------------------------------------------- cwd
+
+def cwd_from_artifact(artifact: str | None) -> str | None:
+    """El campo `artifact` dice sobre qué opina el thread ("/Users/x/repo" o
+    "src/paper.rs:120"). Si es una ruta absoluta, buscamos hacia arriba la
+    raíz de repo — ahí es donde tiene sentido correr al agente."""
+    if not artifact:
+        return None
+    p = Path(_RE_LINE_SUFFIX.sub("", artifact.strip()))
+    if not p.is_absolute():
+        return None
+    candidate = p if p.is_dir() else p.parent
+    for parent in [candidate, *candidate.parents]:
+        if (parent / ".git").exists():
+            return str(parent)
+    return str(candidate) if candidate.is_dir() else None
+
+
+def resolve_cwd(conn, thread: str, ts: dict) -> str:
+    if thread in THREAD_CWD:
+        return THREAD_CWD[thread]
+    if ts.get("cwd"):
+        return ts["cwd"]
+    rows = conn.execute(
+        """
+        SELECT artifact FROM messages
+        WHERE thread = %s AND artifact IS NOT NULL
+        ORDER BY id LIMIT 5
+        """,
+        (thread,),
+    ).fetchall()
+    for r in rows:
+        resolved = cwd_from_artifact(r["artifact"])
+        if resolved:
+            ts["cwd"] = resolved
+            log.info("thread %s -> cwd %s (desde artifact)", thread, resolved)
+            return resolved
+    ts["cwd"] = DEFAULT_CWD
+    log.warning("thread %s sin artifact usable, cwd por defecto %s", thread, DEFAULT_CWD)
+    return DEFAULT_CWD
+
+
+# ---------------------------------------------------------------- disparo
 
 def thread_closed(conn, thread: str) -> bool:
     rows = conn.execute(
@@ -93,71 +240,182 @@ def build_prompt(thread: str, since_id: int, other_author: str, author_to_call: 
         f"mensajes nuevos de '{other_author}'. Respondé como '{author_to_call}' "
         f"con post_message(thread='{thread}', author='{author_to_call}', kind=..., body=...) "
         f"usando el kind que corresponda según el protocolo (critica, "
-        f"respuesta o veredicto). No uses wait_messages, no hace falta: este "
-        f"disparo es automático. Al terminar decime solo el id del mensaje que "
-        f"posteaste."
+        f"respuesta o veredicto). Posteá UN SOLO mensaje. No uses "
+        f"wait_messages, no hace falta: este disparo es automático. Al "
+        f"terminar decime solo el id del mensaje que posteaste."
     )
 
 
-def trigger(author_to_call: str, thread: str, since_id: int, other_author: str, cwd: str):
-    prompt = build_prompt(thread, since_id, other_author, author_to_call)
-    ts = time.strftime("%Y%m%dT%H%M%S")
-    out_path = LOG_DIR / f"{thread}_{author_to_call}_{ts}.log"
-
+def _agent_cmd(author_to_call: str, prompt: str) -> list[str]:
     if author_to_call == "claude":
-        cmd = [
+        return [
             CLAUDE_BIN, "-p", prompt,
             "--allowedTools", "mcp__debate__*", "Read", "Grep", "Glob",
         ]
+    # kimi -p ya corre no-interactivo por su cuenta; --auto/--yolo son
+    # incompatibles con --prompt (kimi rechaza el combo con error)
+    return [KIMI_BIN, "-p", prompt]
+
+
+def _supervise(proc: subprocess.Popen, meta: dict) -> None:
+    """Espera al agente, lo mata si se cuelga, y deja el resultado medido."""
+    start = time.monotonic()
+    timed_out = False
+    try:
+        rc = proc.wait(timeout=AGENT_TIMEOUT_SECS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        # start_new_session=True hizo que el hijo sea líder de su grupo, así
+        # que esto se lleva también a los procesos que él haya lanzado.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        rc = proc.wait()
+    duration = round(time.monotonic() - start, 1)
+
+    if timed_out:
+        log.error("agente %s en %s colgado tras %ss, matado", meta["author"], meta["thread"], AGENT_TIMEOUT_SECS)
+    elif rc != 0:
+        log.error("agente %s en %s salió con rc=%s (%.0fs)", meta["author"], meta["thread"], rc, duration)
     else:
-        # kimi -p ya corre no-interactivo por su cuenta; --auto/--yolo son
-        # incompatibles con --prompt (kimi rechaza el combo con error)
-        cmd = [KIMI_BIN, "-p", prompt]
+        log.info("agente %s en %s ok (%.0fs)", meta["author"], meta["thread"], duration)
 
-    log.info("disparo %s en thread=%s cwd=%s -> %s", author_to_call, thread, cwd, out_path)
-    with open(out_path, "w") as f:
-        subprocess.Popen(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
+    event("trigger_done", rc=rc, timed_out=timed_out, duration_s=duration, **meta)
+
+    with _inflight_lock:
+        _inflight.discard(meta["thread"])
 
 
-def main():
+def trigger(author_to_call: str, thread: str, since_id: int, other_author: str, cwd: str) -> bool:
+    """Lanza al agente. Devuelve False si no llegó a arrancar — el llamador
+    lo reencola en `pending` en vez de perder el turno."""
+    prompt = build_prompt(thread, since_id, other_author, author_to_call)
+    ts_label = time.strftime("%Y%m%dT%H%M%S")
+    out_path = LOG_DIR / f"{thread}_{author_to_call}_{ts_label}.log"
+    meta = {"thread": thread, "author": author_to_call, "since_id": since_id, "cwd": cwd}
+
+    try:
+        f = out_path.open("w")
+        proc = subprocess.Popen(
+            _agent_cmd(author_to_call, prompt),
+            cwd=cwd,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as exc:
+        log.error("no pude lanzar %s en %s: %s", author_to_call, thread, exc)
+        event("trigger_spawn_failed", error=str(exc), **meta)
+        return False
+
+    with _inflight_lock:
+        _inflight.add(thread)
+    log.info("disparo %s en thread=%s cwd=%s -> %s", author_to_call, thread, cwd, out_path.name)
+    event("trigger_spawned", pid=proc.pid, **meta)
+
+    threading.Thread(target=_supervise, args=(proc, meta), daemon=True).start()
+    return True
+
+
+# ---------------------------------------------------------------- ciclo
+
+def process_cycle(conn, state: dict) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, thread, author, kind FROM messages
+        WHERE id > %s ORDER BY id
+        """,
+        (state["last_id"],),
+    ).fetchall()
+
+    # Un solo candidato por thread: el último mensaje. Los intermedios sólo
+    # sirven para la contabilidad (resetear el cap con cada 'analisis').
+    candidates: dict[str, dict] = {}
+    for r in rows:
+        ts = thread_state(state, r["thread"])
+        if r["kind"] == "analisis":
+            ts["triggers"] = 0
+            ts["capped_notified"] = False
+        candidates[r["thread"]] = {"id": r["id"], "thread": r["thread"], "author": r["author"]}
+        state["last_id"] = r["id"]
+
+    # Lo que quedó sin disparar en ciclos anteriores, si no lo pisó algo nuevo.
+    for p in state["pending"]:
+        candidates.setdefault(p["thread"], p)
+    state["pending"] = []
+
+    for thread, cand in candidates.items():
+        ts = thread_state(state, thread)
+
+        if cand["author"] == "adrian":
+            log.info("mensaje de adrian en %s (id=%s), no disparo", thread, cand["id"])
+            continue
+
+        if thread_closed(conn, thread):
+            log.info("thread %s cerrado tras id=%s, no disparo", thread, cand["id"])
+            continue
+
+        if ts["triggers"] >= MAX_TRIGGERS_PER_THREAD:
+            if not ts.get("capped_notified"):
+                log.error(
+                    "thread %s alcanzó el tope de %s disparos sin cerrar: "
+                    "corto el loop. Posteá un 'arbitraje' o un 'analisis' nuevo para reanudar.",
+                    thread, MAX_TRIGGERS_PER_THREAD,
+                )
+                event("thread_capped", thread=thread, triggers=ts["triggers"])
+                ts["capped_notified"] = True
+            continue
+
+        with _inflight_lock:
+            busy = thread in _inflight
+            total = len(_inflight)
+        if busy:
+            log.info("thread %s ya tiene un agente corriendo, encolo id=%s", thread, cand["id"])
+            state["pending"].append(cand)
+            continue
+        if total >= MAX_CONCURRENT_TRIGGERS:
+            log.warning("techo de %s disparos concurrentes, encolo %s", MAX_CONCURRENT_TRIGGERS, thread)
+            state["pending"].append(cand)
+            continue
+
+        other = "claude" if cand["author"] == "kimi" else "kimi"
+        cwd = resolve_cwd(conn, thread, ts)
+        # since_id-1: read_thread devuelve id > since_id, y cand["id"] es
+        # justo el mensaje que disparó este trigger
+        if trigger(other, thread, cand["id"] - 1, cand["author"], cwd):
+            ts["triggers"] += 1
+        else:
+            state["pending"].append(cand)
+
+    save_state(state)
+
+
+def main() -> None:
     state = load_state()
     log.info("relay arrancando, last_id=%s", state["last_id"])
+    backoff = 1
 
     while True:
         try:
             with connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT id, thread, author, kind FROM messages
-                    WHERE id > %s ORDER BY id
-                    """,
-                    (state["last_id"],),
-                ).fetchall()
-
-                for r in rows:
-                    thread, author, kind = r["thread"], r["author"], r["kind"]
-                    state["last_id"] = r["id"]
-
-                    if author == "adrian":
-                        log.info("arbitraje/nota de adrian en %s (id=%s), no disparo nada", thread, r["id"])
-                        save_state(state)
-                        continue
-
-                    if thread_closed(conn, thread):
-                        log.info("thread %s cerrado tras id=%s, no disparo", thread, r["id"])
-                        save_state(state)
-                        continue
-
-                    other = "claude" if author == "kimi" else "kimi"
-                    cwd = THREAD_CWD.get(thread, DEFAULT_CWD)
-                    # since_id-1: read_thread devuelve id > since_id, y r["id"]
-                    # es justo el mensaje que disparó este trigger
-                    trigger(other, thread, r["id"] - 1, author, cwd)
-                    save_state(state)
+                conn.execute(f"LISTEN {CHANNEL_ALL}")
+                log.info("escuchando %s (last_id=%s)", CHANNEL_ALL, state["last_id"])
+                backoff = 1
+                while True:
+                    process_cycle(conn, state)
+                    write_heartbeat(state, pg_ok=True)
+                    # bloquea hasta que entre un mensaje o venza el wake ocioso
+                    for _notify in conn.notifies(timeout=IDLE_WAKE_SECS, stop_after=1):
+                        break
         except Exception:
-            log.exception("error en ciclo de polling")
-
-        time.sleep(POLL_SECS)
+            log.exception("relay: ciclo caído, reintento en %ss", backoff)
+            try:
+                write_heartbeat(state, pg_ok=False)
+            except OSError:
+                pass
+            time.sleep(backoff)
+            backoff = min(backoff * 2, MAX_BACKOFF_SECS)
 
 
 if __name__ == "__main__":
