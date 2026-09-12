@@ -1,0 +1,152 @@
+"""Ejecutor de turnos para asientos type="api" (Ollama y OpenAI-compatibles).
+
+A diferencia de un asiento CLI (un proceso con herramientas que lee el
+journal por MCP), un asiento API no puede llamar al MCP: el relay le inyecta
+el contexto en el prompt —journal inline + pregunta + artefacto— y el modelo
+responde con un voto estructurado:
+
+    POSITION: yes|no|conditional|info
+    CONDITIONS: <condiciones separadas por ;>   (sólo si position=conditional)
+    <razonamiento libre>
+
+El parseo del tag POSITION es el truco de fshiori/magi: el voto es dato sin
+necesidad de que el modelo "llame" nada. Si el tag no parsea, el voto cae a
+'info' con el texto crudo — el turno nunca se pierde, y el humano ve el
+razonamiento en el journal.
+
+Sólo stdlib (urllib): las cabezas API no le agregan dependencias al venv.
+Funciona con Ollama (http://localhost:11434/v1), LM Studio, llama.cpp server
+o cualquier endpoint OpenAI-compatible, local o remoto.
+"""
+
+import json
+import re
+import urllib.request
+
+import personas
+
+POSITION_RE = re.compile(
+    r"^\s*POSITION\s*:\s*(yes|no|conditional|info)\b", re.IGNORECASE | re.MULTILINE
+)
+CONDITIONS_RE = re.compile(r"^\s*CONDITIONS\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+DEFAULT_TIMEOUT_SECS = 600
+JOURNAL_LIMIT = 15        # mensajes del journal que entran al prompt
+BODY_CHARS = 2000         # tope por mensaje inlineado
+
+
+def parse_vote(text: str) -> dict:
+    """Extrae position/conditions de la respuesta del modelo.
+
+    Sin tag parseable → position='info' con el texto crudo: mejor un voto
+    débil explícito que perder el turno o inventar una posición.
+    """
+    m = POSITION_RE.search(text or "")
+    position = m.group(1).lower() if m else "info"
+    conditions = None
+    if position == "conditional":
+        cm = CONDITIONS_RE.search(text)
+        if cm:
+            conditions = [c.strip() for c in cm.group(1).split(";") if c.strip()]
+    return {"position": position, "conditions": conditions, "body": (text or "").strip()}
+
+
+def chat(base_url: str, model: str, system: str, user: str, timeout_secs: int = DEFAULT_TIMEOUT_SECS) -> str:
+    """Un chat completion contra un endpoint OpenAI-compatible. Stdlib only."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": False,
+        # votos, no poesía: temperatura baja para respuestas consistentes
+        "temperature": 0.2,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["choices"][0]["message"]["content"]
+
+
+def build_api_prompt(seat: str, decision: dict, journal: list[dict]) -> tuple[str, str]:
+    """(system, user) para el modelo. La persona va al system con el contrato
+    de respuesta; el contexto completo va al user."""
+    try:
+        persona = personas.system_prompt(seat)
+    except ValueError:
+        persona = f"Sos el asiento '{seat}' del sistema MAGI."
+    history = "\n\n".join(
+        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:BODY_CHARS]}"
+        for m in journal
+    ) or "(journal vacío)"
+    system = (
+        f"{persona}\n\n"
+        "Respondé SIEMPRE con esta estructura y nada fuera de ella:\n"
+        "POSITION: yes|no|conditional|info\n"
+        "CONDITIONS: <condiciones separadas por ;> (sólo si position=conditional)\n"
+        "<tu razonamiento completo>"
+    )
+    user = (
+        f"Decisión #{decision['id']} (protocolo {decision['protocol']}, ronda {decision['round']}): "
+        f"{decision['title']}\n"
+        f"Artefacto sobre el que se decide: {decision.get('artifact') or '—'}\n\n"
+        f"Journal del debate hasta ahora:\n{history}\n\n"
+        "Votá desde tu eje, no desde el consenso esperado. Si es la ronda 2 o más, "
+        "revisá tu posición anterior a la luz de las otras cabezas: cambiala sólo "
+        "si sus argumentos son mejores que los tuyos."
+    )
+    return system, user
+
+
+def run_turn(seat: dict, decision: dict, journal: list[dict]) -> dict:
+    """Un turno completo: prompt → chat → voto parseado.
+
+    `seat` es la entrada del registry (type='api', model, base_url,
+    timeout_secs opcional). `journal` ya viene acotado por el llamador.
+    """
+    system, user = build_api_prompt(seat["seat"], decision, journal)
+    text = chat(
+        seat["base_url"], seat["model"], system, user,
+        seat.get("timeout_secs", DEFAULT_TIMEOUT_SECS),
+    )
+    return parse_vote(text)
+
+
+def build_chat_prompt(seat: str, journal: list[dict]) -> tuple[str, str]:
+    """(system, user) para un turno de CHAT LIBRE (thread sin decisión).
+
+    Mismo contrato que una cabeza CLI en un thread libre: un mensaje de
+    conversación desde su eje. Sin tag POSITION acá — no hay nada que votar.
+    """
+    try:
+        persona = personas.system_prompt(seat)
+    except ValueError:
+        persona = f"Sos el asiento '{seat}' del sistema MAGI."
+    history = "\n\n".join(
+        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:BODY_CHARS]}"
+        for m in journal
+    ) or "(conversación vacía)"
+    system = (
+        f"{persona}\n\n"
+        "Estás en una conversación abierta con el operador humano y las otras "
+        "cabezas del consejo. Respondé UN SOLO mensaje, conciso, desde tu eje "
+        "de decisión: no votes ni uses tags — es charla, no una decisión formal."
+    )
+    user = f"Conversación hasta ahora:\n{history}\n\nRespondé al último mensaje."
+    return system, user
+
+
+def run_chat_turn(seat: dict, journal: list[dict]) -> str:
+    """Un turno de chat: prompt → chat → texto de la respuesta."""
+    system, user = build_chat_prompt(seat["seat"], journal)
+    return chat(
+        seat["base_url"], seat["model"], system, user,
+        seat.get("timeout_secs", DEFAULT_TIMEOUT_SECS),
+    )
