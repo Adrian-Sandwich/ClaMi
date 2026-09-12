@@ -144,9 +144,11 @@ def advance(decision: dict, positions: list[dict]) -> dict:
     return {"action": "next_round", "minority": minority}
 
 
-def build_head_prompt(seat: str, persona: str, decision: dict, since_id: int) -> str:
+def build_head_prompt(seat: str, persona: str, decision: dict, since_id: int,
+                      memory: str | None = None) -> str:
     """Prompt del disparo a una cabeza: su persona + el estado de la decisión +
-    las instrucciones concretas de turno."""
+    las instrucciones concretas de turno. `memory` es el bloque opcional del
+    grafo (memory_ctx): contexto de decisiones previas, no verdad."""
     d = decision
     lines = [
         persona,
@@ -155,6 +157,9 @@ def build_head_prompt(seat: str, persona: str, decision: dict, since_id: int) ->
     ]
     if d.get("artifact"):
         lines.append(f"Artefacto sobre el que se decide: {d['artifact']}")
+    if memory:
+        lines.append("")
+        lines.append(memory)
     lines.append("")
     lines.append(
         f"1. Leé el journal del debate: read_thread(thread='{d['thread']}', since_id={since_id})."

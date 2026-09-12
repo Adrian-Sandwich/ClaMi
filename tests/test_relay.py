@@ -528,7 +528,7 @@ def test_asiento_api_dispara_turno_api_sin_proceso(fired_magi, monkeypatch):
         return {"action": "wait"}, 99
 
     monkeypatch.setattr(relay.board, "record_position", fake_record)
-    monkeypatch.setattr(relay.apihead, "run_turn", lambda seat, d, journal: {
+    monkeypatch.setattr(relay.apihead, "run_turn", lambda seat, d, journal, memory=None: {
         "position": "yes", "conditions": None, "body": "evidencia en el log",
     })
     monkeypatch.setattr(relay, "connect", lambda: FakeConn([]))
@@ -684,3 +684,14 @@ def test_cabeza_cli_inline_en_chat_postea_su_stdout(fired, monkeypatch, tmp_path
         "thread": "t", "author": "melchior",
         "body": "charla de prueba del stub inline",
     }
+
+
+def test_la_memoria_del_grafo_entra_al_prompt_de_la_cabeza(fired_magi, monkeypatch):
+    """El relay consulta el grafo una vez por tanda de turnos y la misma
+    memoria llega a todas las cabezas (es contexto compartido). Sin grafo
+    (degradado) los prompts no cambian."""
+    import memory_ctx
+    monkeypatch.setattr(memory_ctx, "memoria_para", lambda t, a=None: "MEMORIA-PRUEBA-X")
+    relay.process_cycle(FakeConn([], decisions=[mk_decision_row()]), fresh_state())
+    assert fired_magi, "tiene que haber disparos"
+    assert all("MEMORIA-PRUEBA-X" in c["prompt"] for c in fired_magi)

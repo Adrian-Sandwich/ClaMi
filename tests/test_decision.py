@@ -345,3 +345,41 @@ def test_human_message_en_decision_split_arbitra_y_cierra():
     assert out["kind"] == "arbitraje"
     assert out["arbitrated_decision"] == 7
     assert conn.arbitration_attempted
+
+
+def test_build_head_prompt_incluye_la_memoria_opcional():
+    d = mk_decision()
+    persona = personas.system_prompt("melchior")
+    prompt = decision.build_head_prompt(
+        "melchior", persona, d, 0, memory="Memoria del consejo:\n- #1 algo → yes")
+    assert "Memoria del consejo:" in prompt
+    sin = decision.build_head_prompt("melchior", persona, d, 0)
+    assert "Memoria del consejo:" not in sin
+
+
+def test_memory_ctx_trae_decisiones_y_nodos_relacionados(tmp_path, monkeypatch):
+    """El lector del grafo: decisiones recientes siempre + nodos que matchean
+    los términos del título/artefacto. Sin base (ingesta nunca corrida):
+    texto vacío, el sistema deliber igual."""
+    import db as graph_db
+    import memory_ctx
+
+    NOW = "2026-01-01T00:00:00+00:00"
+    path = tmp_path / "memory.db"
+    conn = graph_db.connect(path)
+    graph_db.upsert_node(conn, id="decision:1", domain="decision", source="t",
+                         updated_at=NOW, label="#1 mergeamos relay?",
+                         props={"ruling": "yes", "confidence": 0.66})
+    graph_db.upsert_node(conn, id="file:relay.py", domain="file", source="t",
+                         updated_at=NOW, label="debate-mcp/relay.py")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(memory_ctx, "DB_PATH", path)
+    mem = memory_ctx.memoria_para("otra vez sobre relay.py")
+    assert "#1 mergeamos relay?" in mem
+    assert "yes" in mem
+    assert "file" in mem and "relay.py" in mem
+
+    monkeypatch.setattr(memory_ctx, "DB_PATH", tmp_path / "no-existe.db")
+    assert memory_ctx.memoria_para("cualquier cosa") == ""

@@ -75,9 +75,12 @@ def chat(base_url: str, model: str, system: str, user: str, timeout_secs: int = 
     return data["choices"][0]["message"]["content"]
 
 
-def build_api_prompt(seat: str, decision: dict, journal: list[dict]) -> tuple[str, str]:
+def build_api_prompt(seat: str, decision: dict, journal: list[dict],
+                     memory: str | None = None) -> tuple[str, str]:
     """(system, user) para el modelo. La persona va al system con el contrato
-    de respuesta; el contexto completo va al user."""
+    de respuesta; el contexto completo va al user. `memory` es el bloque
+    opcional del grafo (decisiones previas, archivos tocados): contexto, no
+    verdad."""
     try:
         persona = personas.system_prompt(seat)
     except ValueError:
@@ -93,10 +96,12 @@ def build_api_prompt(seat: str, decision: dict, journal: list[dict]) -> tuple[st
         "CONDITIONS: <condiciones separadas por ;> (sólo si position=conditional)\n"
         "<tu razonamiento completo>"
     )
+    memoria_txt = f"{memory}\n\n" if memory else ""
     user = (
         f"Decisión #{decision['id']} (protocolo {decision['protocol']}, ronda {decision['round']}): "
         f"{decision['title']}\n"
         f"Artefacto sobre el que se decide: {decision.get('artifact') or '—'}\n\n"
+        f"{memoria_txt}"
         f"Journal del debate hasta ahora:\n{history}\n\n"
         "Votá desde tu eje, no desde el consenso esperado. Si es la ronda 2 o más, "
         "revisá tu posición anterior a la luz de las otras cabezas: cambiala sólo "
@@ -105,13 +110,15 @@ def build_api_prompt(seat: str, decision: dict, journal: list[dict]) -> tuple[st
     return system, user
 
 
-def run_turn(seat: dict, decision: dict, journal: list[dict]) -> dict:
+def run_turn(seat: dict, decision: dict, journal: list[dict],
+             memory: str | None = None) -> dict:
     """Un turno completo: prompt → chat → voto parseado.
 
     `seat` es la entrada del registry (type='api', model, base_url,
-    timeout_secs opcional). `journal` ya viene acotado por el llamador.
+    timeout_secs opcional). `journal` ya viene acotado por el llamador;
+    `memory` es el bloque opcional del grafo.
     """
-    system, user = build_api_prompt(seat["seat"], decision, journal)
+    system, user = build_api_prompt(seat["seat"], decision, journal, memory=memory)
     text = chat(
         seat["base_url"], seat["model"], system, user,
         seat.get("timeout_secs", DEFAULT_TIMEOUT_SECS),

@@ -11,7 +11,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PY="${MEMORY_GRAPH_PYTHON:-$(cd .. && pwd)/debate-mcp/.venv/bin/python}"
+# Intérprete portable: el venv de Windows vive en .venv/Scripts, el de
+# macOS/Linux en .venv/bin. Override puntual con MEMORY_GRAPH_PYTHON.
+ROOT="$(cd .. && pwd)"
+PY="${MEMORY_GRAPH_PYTHON:-}"
+if [[ -z "$PY" ]]; then
+    if [[ -x "$ROOT/debate-mcp/.venv/Scripts/python.exe" ]]; then
+        PY="$ROOT/debate-mcp/.venv/Scripts/python.exe"
+    else
+        PY="$ROOT/debate-mcp/.venv/bin/python"
+    fi
+fi
 if [[ ! -x "$PY" ]]; then
     echo "refresh.sh: no encuentro el intérprete en $PY" >&2
     echo "  creá el venv:  python3.14 -m venv ../debate-mcp/.venv && ../debate-mcp/.venv/bin/pip install -r ../debate-mcp/requirements.txt" >&2

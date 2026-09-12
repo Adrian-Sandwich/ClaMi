@@ -71,6 +71,7 @@ import psycopg  # noqa: E402
 
 import apihead  # noqa: E402
 import board  # noqa: E402
+import memory_ctx  # noqa: E402
 import decision  # noqa: E402
 import heads  # noqa: E402
 import personas  # noqa: E402
@@ -385,7 +386,7 @@ def trigger(seat_name: str, thread: str, since_id: int, cwd: str, prompt: str, m
 
 # ---------------------------------------------------------------- disparo API
 
-def _run_api_turn(seat_info: dict, d: dict) -> None:
+def _run_api_turn(seat_info: dict, d: dict, memory: str | None = None) -> None:
     """Un turno de asiento API, síncrono: journal inline → chat → voto
     registrado con la misma lógica que cast_position. Si algo falla, el
     error queda en eventos: pending_turns sigue viendo al asiento sin votar
@@ -405,7 +406,7 @@ def _run_api_turn(seat_info: dict, d: dict) -> None:
                 (d["thread"], apihead.JOURNAL_LIMIT),
             ).fetchall()
             journal = [dict(m) for m in reversed(rows)]
-            vote = apihead.run_turn(seat_info, d, journal)
+            vote = apihead.run_turn(seat_info, d, journal, memory=memory)
             with conn.transaction():
                 board.record_position(
                     conn, d["id"], seat_info["seat"],
@@ -423,15 +424,15 @@ def _run_api_turn(seat_info: dict, d: dict) -> None:
               duration_s=round(time.monotonic() - start, 1), **meta)
 
 
-def _run_api_turn_bg(seat_info: dict, d: dict) -> None:
+def _run_api_turn_bg(seat_info: dict, d: dict, memory: str | None = None) -> None:
     try:
-        _run_api_turn(seat_info, d)
+        _run_api_turn(seat_info, d, memory)
     finally:
         with _inflight_lock:
             _inflight.discard(_token(d["thread"], seat_info["seat"]))
 
 
-def fire_api_turn(seat_info: dict, d: dict) -> bool:
+def fire_api_turn(seat_info: dict, d: dict, memory: str | None = None) -> bool:
     """Dispara el turno de un asiento API en una decisión, en un thread propio."""
     with _inflight_lock:
         _inflight.add(_token(d["thread"], seat_info["seat"]))
@@ -441,7 +442,7 @@ def fire_api_turn(seat_info: dict, d: dict) -> bool:
     )
     event("trigger_spawned", pid=None, thread=d["thread"], author=seat_info["seat"],
           decision_id=d["id"], round=d["round"], turn="api")
-    threading.Thread(target=_run_api_turn_bg, args=(seat_info, d), daemon=True).start()
+    threading.Thread(target=_run_api_turn_bg, args=(seat_info, d, memory), daemon=True).start()
     return True
 
 
@@ -537,7 +538,7 @@ def _journal_inline(conn, thread: str) -> list[dict]:
     return [dict(m) for m in reversed(rows)]
 
 
-def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> None:
+def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None = None) -> None:
     """Turno de decisión de una cabeza CLI que NO carga el MCP del tablero
     (p.ej. codex exec: en modo no interactivo no expone tools de servers
     externos — verificado 2026-09-12 con su propio debug log). El relay le
@@ -552,7 +553,7 @@ def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> None:
     try:
         with connect() as conn:
             journal = _journal_inline(conn, d["thread"])
-        system, user = apihead.build_api_prompt(seat_info["seat"], d, journal)
+        system, user = apihead.build_api_prompt(seat_info["seat"], d, journal, memory=memory)
         text = _run_cli_inline(
             seat_info, f"{system}\n\n{user}", cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
@@ -574,15 +575,15 @@ def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> None:
               duration_s=round(time.monotonic() - start, 1), **meta)
 
 
-def _run_cli_inline_turn_bg(seat_info: dict, d: dict, cwd: str) -> None:
+def _run_cli_inline_turn_bg(seat_info: dict, d: dict, cwd: str, memory: str | None = None) -> None:
     try:
-        _run_cli_inline_turn(seat_info, d, cwd)
+        _run_cli_inline_turn(seat_info, d, cwd, memory)
     finally:
         with _inflight_lock:
             _inflight.discard(_token(d["thread"], seat_info["seat"]))
 
 
-def fire_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> bool:
+def fire_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None = None) -> bool:
     """Dispara el turno de decisión de una cabeza journal-inline."""
     with _inflight_lock:
         _inflight.add(_token(d["thread"], seat_info["seat"]))
@@ -590,7 +591,7 @@ def fire_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> bool:
              seat_info["seat"], seat_info.get("name"), d["id"], d["round"])
     event("trigger_spawned", pid=None, thread=d["thread"], author=seat_info["seat"],
           decision_id=d["id"], round=d["round"], turn="cli-inline")
-    threading.Thread(target=_run_cli_inline_turn_bg, args=(seat_info, d, cwd), daemon=True).start()
+    threading.Thread(target=_run_cli_inline_turn_bg, args=(seat_info, d, cwd, memory), daemon=True).start()
     return True
 
 
@@ -710,6 +711,10 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
     # since_id fijo en el anchor: la cabeza siempre lee el journal completo
     # desde el título (sabe lo que dijeron las otras en rondas previas).
     since_id = max((d.get("anchor_id") or 1) - 1, 0)
+    # Memoria del consejo: una sola consulta al grafo por tanda de turnos,
+    # misma para las tres cabezas (es contexto compartido, no una ventaja).
+    # Si el grafo no existe o falla, memoria queda vacío: nada cambia.
+    memoria = memory_ctx.memoria_para(d["title"], d.get("artifact"))
 
     for turn in turns:
         token = _token(d["thread"], turn["seat"])
@@ -731,11 +736,11 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
         if seat_info.get("journal") == "inline":
             # cabeza CLI sin MCP (codex exec): prompt con journal inlineado
             # por stdin y voto parseado del stdout.
-            if fire_cli_inline_turn(seat_info, d, cwd):
+            if fire_cli_inline_turn(seat_info, d, cwd, memoria):
                 ts["triggers"] += 1
             continue
         if seat_info.get("type") == "api":
-            if fire_api_turn(seat_info, d):
+            if fire_api_turn(seat_info, d, memoria):
                 ts["triggers"] += 1
             continue
         if not seat_info.get("bin"):
@@ -743,7 +748,7 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
             event("trigger_spawn_failed", error="asiento sin binario",
                   thread=d["thread"], author=turn["seat"], decision_id=d["id"])
             continue
-        prompt = decision.build_head_prompt(turn["seat"], _persona_text(turn["seat"]), d, since_id)
+        prompt = decision.build_head_prompt(turn["seat"], _persona_text(turn["seat"]), d, since_id, memory=memoria)
         meta = {"decision_id": d["id"], "round": turn["round"], "turn": turn["kind"]}
         if trigger(turn["seat"], d["thread"], since_id, cwd, prompt, meta):
             ts["triggers"] += 1
