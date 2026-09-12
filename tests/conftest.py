@@ -5,10 +5,13 @@ real ni al Postgres real.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+REAL_POPEN = subprocess.Popen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -61,10 +64,16 @@ def real_kimi_logs() -> Path:
 @pytest.fixture(autouse=True)
 def _no_accidental_agent_spawn(monkeypatch):
     """Red de seguridad: ningún test tiene por qué lanzar un `claude -p` real."""
-    import subprocess
-
     def _boom(*a, **kw):
         raise AssertionError(f"un test intentó lanzar un proceso: {a[:1]}")
 
     monkeypatch.setattr(subprocess, "Popen", _boom, raising=True)
     os.environ.setdefault("DEBATE_CONNINFO", "dbname=debate user=adrianmedina host=localhost")
+
+
+@pytest.fixture
+def allow_real_processes(monkeypatch):
+    """Opt-in para los tests que SÍ lanzan un proceso a propósito: stubs
+    locales triviales (un print) que validan el pipeline de disparo. La red
+    _no_accidental_agent_spawn sigue aplicando a todo lo demás."""
+    monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)

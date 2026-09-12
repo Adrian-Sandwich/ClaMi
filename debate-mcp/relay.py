@@ -59,6 +59,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -502,6 +503,149 @@ def fire_api_chat_turn(seat_info: dict, thread: str, since_id: int) -> bool:
     return True
 
 
+# ------------------------------------------- cabezas CLI sin MCP (journal inline)
+
+def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int) -> str:
+    """Corre una cabeza CLI con el prompt por STDIN (archivo temporal) y
+    devuelve su stdout completo. STDIN en vez de argv: los prompts de turno
+    tienen comillas y tildes que el re-quoting de shims .cmd (codex.cmd)
+    rompería; y `codex exec -` lee el prompt de stdin de todos modos."""
+    with tempfile.TemporaryDirectory(prefix=f"magi-{seat_info['seat']}-") as tmp:
+        pin = Path(tmp) / "prompt.txt"
+        pout = Path(tmp) / "out.txt"
+        pin.write_text(prompt, encoding="utf-8")
+        with pin.open("rb") as fin, pout.open("wb") as fout:
+            proc = subprocess.Popen(
+                [seat_info["bin"], *seat_info.get("args", []), "-"],
+                cwd=cwd, stdin=fin, stdout=fout, stderr=subprocess.STDOUT,
+            )
+            rc = proc.wait(timeout=timeout)
+        text = pout.read_text(encoding="utf-8", errors="replace")
+    if rc != 0:
+        raise RuntimeError(f"{seat_info['seat']} salió rc={rc}: {text[-300:]}")
+    return text
+
+
+def _journal_inline(conn, thread: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT author, kind, body FROM messages
+        WHERE thread = %s ORDER BY id DESC LIMIT %s
+        """,
+        (thread, apihead.JOURNAL_LIMIT),
+    ).fetchall()
+    return [dict(m) for m in reversed(rows)]
+
+
+def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> None:
+    """Turno de decisión de una cabeza CLI que NO carga el MCP del tablero
+    (p.ej. codex exec: en modo no interactivo no expone tools de servers
+    externos — verificado 2026-09-12 con su propio debug log). El relay le
+    inlinea el journal en el prompt (mismo builder que las cabezas API) y
+    parsea el tag POSITION: de su salida; la salida completa queda como
+    body del voto. El proceso puede investigar el repo con sus propias
+    herramientas de lectura aunque no pueda votar por MCP."""
+    start = time.monotonic()
+    meta = {"thread": d["thread"], "author": seat_info["seat"],
+            "token": _token(d["thread"], seat_info["seat"]),
+            "decision_id": d["id"], "round": d["round"], "turn": "cli-inline"}
+    try:
+        with connect() as conn:
+            journal = _journal_inline(conn, d["thread"])
+        system, user = apihead.build_api_prompt(seat_info["seat"], d, journal)
+        text = _run_cli_inline(
+            seat_info, f"{system}\n\n{user}", cwd,
+            seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
+        )
+        vote = apihead.parse_vote(text)
+        with connect() as conn:
+            with conn.transaction():
+                board.record_position(
+                    conn, d["id"], seat_info["seat"],
+                    vote["position"], vote["body"], vote["conditions"],
+                )
+        log.info("cabeza inline %s votó %s en decisión %s (%.0fs)",
+                 seat_info["seat"], vote["position"], d["id"], time.monotonic() - start)
+        event("trigger_done", rc=0, timed_out=False,
+              duration_s=round(time.monotonic() - start, 1), **meta)
+    except Exception as exc:
+        log.error("turno inline de %s en %s falló: %s", seat_info["seat"], d["thread"], exc)
+        event("trigger_done", rc=1, error=str(exc),
+              duration_s=round(time.monotonic() - start, 1), **meta)
+
+
+def _run_cli_inline_turn_bg(seat_info: dict, d: dict, cwd: str) -> None:
+    try:
+        _run_cli_inline_turn(seat_info, d, cwd)
+    finally:
+        with _inflight_lock:
+            _inflight.discard(_token(d["thread"], seat_info["seat"]))
+
+
+def fire_cli_inline_turn(seat_info: dict, d: dict, cwd: str) -> bool:
+    """Dispara el turno de decisión de una cabeza journal-inline."""
+    with _inflight_lock:
+        _inflight.add(_token(d["thread"], seat_info["seat"]))
+    log.info("turno inline %s (%s) en decisión %s, ronda %s",
+             seat_info["seat"], seat_info.get("name"), d["id"], d["round"])
+    event("trigger_spawned", pid=None, thread=d["thread"], author=seat_info["seat"],
+          decision_id=d["id"], round=d["round"], turn="cli-inline")
+    threading.Thread(target=_run_cli_inline_turn_bg, args=(seat_info, d, cwd), daemon=True).start()
+    return True
+
+
+def _run_cli_inline_chat_turn(seat_info: dict, thread: str, cwd: str) -> None:
+    """Turno de chat libre de una cabeza journal-inline: prompt de charla,
+    stdout completo posteado como UN mensaje 'respuesta' (igual contrato
+    que el turno API de chat)."""
+    start = time.monotonic()
+    meta = {"thread": thread, "author": seat_info["seat"], "token": _token(thread),
+            "turn": "free-inline"}
+    try:
+        with connect() as conn:
+            journal = _journal_inline(conn, thread)
+        system, user = apihead.build_chat_prompt(seat_info["seat"], journal)
+        text = _run_cli_inline(
+            seat_info, f"{system}\n\n{user}", cwd,
+            seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
+        ).strip()
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO messages (thread, author, kind, body, artifact)
+                VALUES (%s, %s, 'respuesta', %s, NULL)
+                """,
+                (thread, seat_info["seat"], text),
+            )
+        log.info("cabeza inline %s respondió en %s (%.0fs)",
+                 seat_info["seat"], thread, time.monotonic() - start)
+        event("trigger_done", rc=0, timed_out=False,
+              duration_s=round(time.monotonic() - start, 1), **meta)
+    except Exception as exc:
+        log.error("turno inline de chat de %s en %s falló: %s", seat_info["seat"], thread, exc)
+        event("trigger_done", rc=1, error=str(exc),
+              duration_s=round(time.monotonic() - start, 1), **meta)
+
+
+def _run_cli_inline_chat_turn_bg(seat_info: dict, thread: str, cwd: str) -> None:
+    try:
+        _run_cli_inline_chat_turn(seat_info, thread, cwd)
+    finally:
+        with _inflight_lock:
+            _inflight.discard(_token(thread))
+
+
+def fire_cli_inline_chat_turn(seat_info: dict, thread: str, cwd: str) -> bool:
+    """Dispara el turno de chat de una cabeza journal-inline."""
+    with _inflight_lock:
+        _inflight.add(_token(thread))
+    log.info("turno inline de chat %s (%s) en thread %s",
+             seat_info["seat"], seat_info.get("name"), thread)
+    event("trigger_spawned", pid=None, thread=thread, author=seat_info["seat"], turn="free-inline")
+    threading.Thread(target=_run_cli_inline_chat_turn_bg, args=(seat_info, thread, cwd), daemon=True).start()
+    return True
+
+
 # ---------------------------------------------------------------- decisiones
 
 def fetch_open_decisions(conn) -> list[dict]:
@@ -583,6 +727,12 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
         if seat_info is None:
             log.error("asiento %s ya no está en el registry, no lo puedo disparar", turn["seat"])
             event("trigger_spawn_failed", error="asiento fuera del registry", thread=d["thread"], author=turn["seat"])
+            continue
+        if seat_info.get("journal") == "inline":
+            # cabeza CLI sin MCP (codex exec): prompt con journal inlineado
+            # por stdin y voto parseado del stdout.
+            if fire_cli_inline_turn(seat_info, d, cwd):
+                ts["triggers"] += 1
             continue
         if seat_info.get("type") == "api":
             if fire_api_turn(seat_info, d):
@@ -688,6 +838,15 @@ def process_cycle(conn, state: dict) -> None:
             log.error("thread %s sin asientos en el registry, no puedo disparar", thread)
             continue
         seat_info = heads.seat_by_name(other)
+        if seat_info is not None and seat_info.get("journal") == "inline":
+            # chat libre de una cabeza sin MCP: el stdout se postea como
+            # respuesta (igual contrato que el turno API de chat).
+            cwd = resolve_cwd(conn, thread, ts)
+            if fire_cli_inline_chat_turn(seat_info, thread, cwd):
+                ts["triggers"] += 1
+            else:
+                state["pending"].append(cand)
+            continue
         if seat_info is not None and seat_info.get("type") == "api":
             # el round-robin también sirve para cabezas API (Ollama y
             # compatibles): sin esto, el chat se colgaba cada vez que tocaba

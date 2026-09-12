@@ -618,3 +618,69 @@ def test_kill_tree_usa_el_mecanismo_de_la_plataforma(monkeypatch):
     if sys.platform == "win32":
         assert calls[0][:3] == ["taskkill", "/F", "/T"]
         assert str(_Proc.pid) in calls[0]
+
+
+# --------------------------------------------------------- cabezas CLI journal-inline
+
+def test_cabeza_cli_inline_parsea_el_voto_de_stdout(fired_magi, monkeypatch, tmp_path, allow_real_processes):
+    """Asiento CLI sin MCP (journal='inline', p.ej. codex exec, cuyo modo
+    no interactivo no expone tools de servers externos): el relay inlinea
+    el journal en el prompt, corre el proceso y registra el voto parseado
+    del POSITION: del stdout."""
+    stub = tmp_path / "stub_vota.py"
+    stub.write_text(
+        "print('POSITION: yes')" + chr(10) + "print()" + chr(10) + "print('[stub] razon inline')" + chr(10),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(heads, "load", lambda: [
+        {"seat": "melchior", "name": "stub-inline", "type": "cli",
+         "journal": "inline", "bin": sys.executable, "args": [str(stub)]},
+    ])
+    recorded = {}
+
+    def fake_record(conn, decision_id, author, position, body, conditions=None):
+        recorded.update(decision_id=decision_id, author=author,
+                        position=position, body=body)
+        return {"action": "wait"}, 1
+
+    monkeypatch.setattr(relay.board, "record_position", fake_record)
+    monkeypatch.setattr(relay, "connect", lambda: FakeConn([]))
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+
+    relay.process_cycle(FakeConn([], decisions=[mk_decision_row()]), fresh_state())
+
+    assert recorded["author"] == "melchior"
+    assert recorded["position"] == "yes"
+    assert "razon inline" in recorded["body"]
+
+
+def test_cabeza_cli_inline_en_chat_postea_su_stdout(fired, monkeypatch, tmp_path, allow_real_processes):
+    """El chat libre también funciona sin MCP: el stdout completo se postea
+    como un único mensaje 'respuesta'."""
+    stub = tmp_path / "stub_charla.py"
+    stub.write_text("print('charla de prueba del stub inline')", encoding="utf-8")
+    monkeypatch.setattr(heads, "load", lambda: [
+        {"seat": "melchior", "name": "stub-inline", "type": "cli",
+         "journal": "inline", "bin": sys.executable, "args": [str(stub)]},
+    ])
+
+    inserted = {}
+
+    class _ChatConn(FakeConn):
+        def execute(self, query, params=()):
+            q = " ".join(query.split())
+            if q.startswith("INSERT INTO messages"):
+                # VALUES (%s, %s, 'respuesta', %s, NULL): thread, author, body
+                inserted.update(thread=params[0], author=params[1], body=params[2])
+                return _Result([])
+            return super().execute(query, params)
+
+    monkeypatch.setattr(relay, "connect", lambda: _ChatConn([]))
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+
+    relay.process_cycle(FakeConn([msg(1, author="adrian", kind="analisis")]), fresh_state())
+
+    assert inserted == {
+        "thread": "t", "author": "melchior",
+        "body": "charla de prueba del stub inline",
+    }

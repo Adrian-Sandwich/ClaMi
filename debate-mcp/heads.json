@@ -11,11 +11,14 @@
     },
     {
       "seat": "balthasar",
-      "name": "qwen2.5:3b (ollama)",
-      "type": "api",
-      "model": "qwen2.5:3b",
-      "base_url": "http://127.0.0.1:11434/v1",
-      "timeout_secs": 600
+      "name": "codex (gpt-6-astra)",
+      "type": "cli",
+      "journal": "inline",
+      "bin": "C:/Users/Adrian/src/ClaMi/debate-mcp/bin/codex.cmd",
+      "args": [
+        "exec"
+      ],
+      "timeout_secs": 900
     },
     {
       "seat": "casper",
