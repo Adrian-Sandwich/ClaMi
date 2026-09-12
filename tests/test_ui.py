@@ -1,0 +1,389 @@
+"""Tests de la UI MAGI (magi_ui.py): el kanji del veredicto, el snapshot de
+estado, el frame SSE y el server HTTP stdlib end-to-end con una conexión y un
+board de mentira. Nada toca Postgres ni el registry real."""
+
+import http.client
+import json
+import threading
+from datetime import datetime, timezone
+
+import pytest
+
+import magi_ui
+
+
+def _decision(id, status="open", ruling=None, round=1, title="¿Ataque?"):
+    return {
+        "id": id, "title": title, "artifact": "/repo/auth.log",
+        "protocol": "critique", "status": status, "ruling": ruling,
+        "confidence": 0.66 if ruling else None, "round": round,
+        "thread": f"d{id}", "heads": ["melchior", "balthasar", "casper"],
+    }
+
+
+DECISIONS = [
+    _decision(2, status="open", round=2, title="¿Hay SQLi?"),
+    _decision(1, status="closed", ruling="yes", title="¿Puerto abierto?"),
+]
+
+POSITIONS = [
+    {"decision_id": 1, "head": "melchior", "round": 1, "position": "yes", "conditions": None, "body": "sí hay"},
+    {"decision_id": 1, "head": "balthasar", "round": 1, "position": "yes", "conditions": None, "body": "afirmo"},
+    {"decision_id": 1, "head": "casper", "round": 1, "position": "no", "conditions": ["no hay egress"], "body": "no convence"},
+    {"decision_id": 2, "head": "melchior", "round": 1, "position": "yes", "conditions": None, "body": "evidencia"},
+    {"decision_id": 2, "head": "balthasar", "round": 1, "position": "no", "conditions": None, "body": "dudas"},
+    {"decision_id": 2, "head": "casper", "round": 1, "position": "conditional", "conditions": ["ver egress"], "body": "depende"},
+    {"decision_id": 2, "head": "melchior", "round": 2, "position": "yes", "conditions": None, "body": "me mantengo"},
+]
+
+MESSAGES = [
+    {"thread": "d2", "author": "melchior", "kind": "posicion", "body": "me mantengo",
+     "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+    {"thread": "d2", "author": "adrian", "kind": "analisis", "body": "¿Hay SQLi?",
+     "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
+    {"thread": "d1", "author": "magi", "kind": "resultado", "body": "CERRADA ruling: yes",
+     "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
+]
+
+
+class FakeUiConn:
+    def __init__(self):
+        self.decisions, self.positions, self.messages = DECISIONS, POSITIONS, MESSAGES
+
+    def execute(self, query, params=()):
+        q = " ".join(query.split())
+        if "FROM decisions WHERE status = 'open'" in q:
+            rows = [d for d in self.decisions if d["status"] == "open"]
+        elif "FROM decisions WHERE status <> 'open'" in q:
+            limit = params[0] if params else len(self.decisions)
+            rows = [d for d in self.decisions if d["status"] != "open"][:limit]
+        elif q.startswith("SELECT p.decision_id"):
+            rows = [p for p in self.positions if p["decision_id"] in params[0]]
+        elif q.startswith("SELECT thread, author, kind, body, created_at"):
+            # journal de decisiones: threads dados, filtrado por kinds de
+            # conversación (params[1]), en DESC — build_state revierte
+            threads, kinds = params[0], params[1]
+            rows = [m for m in self.messages
+                    if m["thread"] in threads and m["kind"] in kinds][::-1]
+        elif q.startswith("SELECT id, thread, status FROM decisions"):
+            # la consulta del modo council trae los estados inline en el SQL
+            import re as _re
+            statuses = _re.findall(r"'(\w+)'", q.split("IN", 1)[1])
+            rows = [
+                {"id": d["id"], "thread": d["thread"], "status": d["status"]}
+                for d in self.decisions if d["status"] in statuses
+            ]
+        elif q.startswith("SELECT author, kind, body, created_at"):
+            # el thread de chat: mensajes de UN thread, los últimos N en DESC
+            # (build_state revierte para cronológico)
+            rows = [m for m in self.messages if m["thread"] == params[0]][-params[1]:][::-1]
+        else:
+            raise AssertionError(f"query inesperada: {q}")
+        return _R(rows)
+
+    def transaction(self):
+        class _Tx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+        return _Tx()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _R:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+# ------------------------------------------------------------ verdict_badge
+
+def test_badge_abierto_es_deliberating_paradeando():
+    b = magi_ui.verdict_badge({"status": "open", "ruling": None})
+    assert b["text"] == "DELIBERATING" and b["flicker"] is True
+
+
+def test_badge_split_es_stalemate_gris():
+    b = magi_ui.verdict_badge({"status": "split", "ruling": None})
+    assert b["text"] == "STALEMATE" and b["color"] == "gray" and b["flicker"] is False
+
+
+def test_badge_cerrada_usa_el_ruling():
+    assert magi_ui.verdict_badge({"status": "closed", "ruling": "yes"})["text"] == "APPROVED"
+    assert magi_ui.verdict_badge({"status": "closed", "ruling": "no"})["color"] == "#a41413"
+    # cerrada por arbitraje humano (sin ruling de máquina) = STALEMATE
+    assert magi_ui.verdict_badge({"status": "closed", "ruling": None})["text"] == "STALEMATE"
+
+
+# ------------------------------------------------------------ build_state
+
+def test_build_state_marca_votos_de_la_ronda_actual():
+    state = magi_ui.build_state(FakeUiConn())
+    d2 = state["decisions"][0]
+    assert d2["id"] == 2 and d2["status"] == "open"
+    assert d2["badge"]["flicker"] is True
+    seats = {s["seat"]: s for s in d2["seats"]}
+    assert seats["melchior"]["voted"] is True, "melchior recasteó en ronda 2"
+    assert seats["melchior"]["body"] == "me mantengo"
+    assert seats["balthasar"]["voted"] is False, "su voto es de la ronda 1"
+    assert seats["balthasar"]["position"] == "no"
+    assert seats["casper"]["conditions"] == ["ver egress"]
+
+
+def test_build_state_trae_journal_y_cerradas():
+    state = magi_ui.build_state(FakeUiConn())
+    d1 = state["decisions"][1]
+    assert d1["status"] == "closed" and d1["badge"]["text"] == "APPROVED"
+    assert d1["journal"][0]["kind"] == "resultado"
+    d2 = state["decisions"][0]
+    # la conversación de una decisión son las posiciones, no el título
+    # (kind 'analisis' queda fuera: es el encabezado, no un turno)
+    assert [m["author"] for m in d2["journal"]] == ["melchior"]
+
+
+def test_sse_frame_es_data_json_utf8():
+    frame = magi_ui.sse_frame({"text": "APPROVED · 承認"})
+    assert frame.startswith(b"data: ") and frame.endswith(b"\n\n")
+    assert "承認".encode("utf-8") in frame, "los caracteres no-ASCII viajan en UTF-8 real, no \\uXXXX"
+
+
+# ------------------------------------------------------------ server HTTP
+
+@pytest.fixture
+def ui_server(monkeypatch):
+    started = {}
+
+    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian", seats=None):
+        if not title:
+            raise ValueError("falta el título")
+        started.update({"title": title, "artifact": artifact, "protocol": protocol})
+        return {"decision_id": 99, "thread": "d99", "seats": ["melchior"], "degraded": []}
+
+    monkeypatch.setattr(magi_ui, "connect", lambda: FakeUiConn())
+    monkeypatch.setattr(magi_ui.board, "start_decision", fake_start)
+    server = magi_ui.ThreadingHTTPServer(("127.0.0.1", 0), magi_ui.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1], started
+    server.shutdown()
+
+
+def _get(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    return conn.getresponse()
+
+
+def test_get_index_y_estaticos(ui_server):
+    port, _ = ui_server
+    for path, ctype in (("/", "text/html"), ("/style.css", "text/css"), ("/app.js", "text/javascript")):
+        resp = _get(port, path)
+        assert resp.status == 200, path
+        assert ctype in resp.getheader("Content-Type"), path
+        assert len(resp.read()) > 100
+
+
+def test_get_state_devuelve_el_snapshot(ui_server):
+    port, _ = ui_server
+    resp = _get(port, "/state")
+    assert resp.status == 200
+    state = json.loads(resp.read())
+    assert [d["id"] for d in state["decisions"]] == [2, 1]
+
+
+def test_get_events_envia_frame_inicial(ui_server):
+    port, _ = ui_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/events")
+    resp = conn.getresponse()
+    assert resp.status == 200
+    assert "text/event-stream" in resp.getheader("Content-Type")
+    chunk = resp.read1(1 << 20)
+    assert chunk.startswith(b"data: ")
+    assert "APPROVED".encode("utf-8") in chunk
+    conn.close()
+
+
+def test_post_start_abre_decision_y_propaga_errores(ui_server):
+    port, started = ui_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/start", json.dumps({
+        "title": "¿Hubo ataque?", "artifact": "/a.log", "protocol": "adaptive",
+    }), {"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    assert resp.status == 201
+    body = json.loads(resp.read())
+    assert body["decision_id"] == 99
+    assert started["protocol"] == "adaptive"
+
+    conn.request("POST", "/start", json.dumps({"title": ""}), {"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    assert resp.status == 400
+    assert "error" in json.loads(resp.read())
+
+
+def test_post_start_con_body_mal_codificado_devuelve_400(ui_server):
+    """Prueba manual del 2026-09-12: un cliente que manda el JSON en latin1
+    (ó = 0xF3) explotaba json.loads en el handler y cortaba la conexión sin
+    respuesta. Hoy es un 400 como cualquier otro JSON inválido."""
+    port, started = ui_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/start", b'{"title": "Decisi\xF3n"}',
+                 {"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    assert resp.status == 400
+    assert "error" in json.loads(resp.read())
+    assert started == {}, "no se abrió ninguna decisión con un body roto"
+
+
+# ------------------------------------------------------------ chat (POST /message)
+
+def _post(port, path, payload):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+    return conn.getresponse()
+
+
+def test_post_message_mode_decision_abre_con_el_texto_libre(ui_server, monkeypatch):
+    port, started = ui_server
+    resp = _post(port, "/message", {"mode": "decision", "body": "¿arrancamos con el plan?"})
+    assert resp.status == 201
+    body = json.loads(resp.read())
+    assert body["decision_id"] == 99
+    assert body["kind"] == "decision"
+    assert started["title"] == "¿arrancamos con el plan?"
+    assert started["protocol"] == "adaptive", "el chat vota con el protocolo completo"
+
+
+def test_post_message_mode_decision_acepta_protocolo_explicito(ui_server):
+    port, started = ui_server
+    resp = _post(port, "/message", {"mode": "decision", "body": "x", "protocol": "vote"})
+    assert resp.status == 201
+    assert started["protocol"] == "vote"
+
+
+def test_post_message_a_thread_libre_manda_analisis(ui_server, monkeypatch):
+    port, _ = ui_server
+    calls = {}
+
+    def fake_human(conn, thread, body):
+        calls.update({"thread": thread, "body": body})
+        return {"id": 5, "kind": "analisis", "arbitrated_decision": None}
+
+    monkeypatch.setattr(magi_ui.board, "human_message", fake_human)
+    resp = _post(port, "/message", {"mode": "message", "thread": "chat", "body": "hola consejo"})
+    assert resp.status == 201
+    body = json.loads(resp.read())
+    assert body["kind"] == "analisis"
+    assert calls == {"thread": "chat", "body": "hola consejo"}
+
+
+def test_post_message_sin_thread_cae_al_chat(ui_server, monkeypatch):
+    port, _ = ui_server
+    calls = {}
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda conn, thread, body: calls.update({"thread": thread}) or {"id": 1, "kind": "analisis"},
+    )
+    resp = _post(port, "/message", {"mode": "message", "body": "hola"})
+    assert resp.status == 201
+    assert calls["thread"] == "chat"
+
+
+def test_post_message_rechaza_body_vacio(ui_server, monkeypatch):
+    port, _ = ui_server
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda *a, **kw: pytest.fail("no tiene que llegar a human_message"),
+    )
+    resp = _post(port, "/message", {"mode": "message", "body": "   "})
+    assert resp.status == 400
+
+
+def test_build_state_incluye_el_chat():
+    conn = FakeUiConn()
+    conn.messages = [
+        {"thread": "chat", "author": "adrian", "kind": "analisis", "body": "¿qué opinan?",
+         "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)},
+        {"thread": "chat", "author": "melchior", "kind": "respuesta", "body": "yo digo que sí",
+         "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc)},
+    ]
+    state = magi_ui.build_state(conn)
+    assert [m["author"] for m in state["chat"]] == ["adrian", "melchior"]
+    assert state["chat"][1]["body"] == "yo digo que sí"
+
+
+@pytest.fixture
+def ui_server_conn(monkeypatch, tmp_path):
+    """Igual que ui_server, pero exponiendo el FakeUiConn para simular el
+    estado del tablero (decisiones abiertas/split/cerradas)."""
+    started = {}
+
+    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian", seats=None):
+        if not title:
+            raise ValueError("falta el título")
+        started.update({"title": title, "artifact": artifact, "protocol": protocol})
+        return {"decision_id": 99, "thread": "d99", "seats": ["melchior"], "degraded": []}
+
+    conn = FakeUiConn()
+    monkeypatch.setattr(magi_ui, "connect", lambda: conn)
+    monkeypatch.setattr(magi_ui.board, "start_decision", fake_start)
+    server = magi_ui.ThreadingHTTPServer(("127.0.0.1", 0), magi_ui.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1], started, conn
+    server.shutdown()
+
+
+def test_council_con_decision_abierta_manda_contexto(ui_server_conn, monkeypatch):
+    """La caja única: en modo council el sistema elige el destino. Con una
+    decisión abierta, el mensaje del operador es CONTEXTO para las cabezas."""
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(2, status="open", round=1)]
+    calls = {}
+
+    def fake_human(c, thread, body):
+        calls.update(thread=thread, body=body)
+        return {"id": 5, "kind": "contexto", "arbitrated_decision": None}
+
+    monkeypatch.setattr(magi_ui.board, "human_message", fake_human)
+    resp = _post(port, "/message", {"mode": "council", "body": "mirá también config.py"})
+    assert resp.status == 201
+    body = json.loads(resp.read())
+    assert body["action"] == "context"
+    assert body["decision_id"] == 2
+    assert calls == {"thread": "d2", "body": "mirá también config.py"}
+
+
+def test_council_con_stalemate_arbitra(ui_server_conn, monkeypatch):
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(3, status="split", round=3)]
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda c, thread, body: {"id": 6, "kind": "arbitraje", "arbitrated_decision": 3},
+    )
+    resp = _post(port, "/message", {"mode": "council", "body": "cierro: sí, con condiciones"})
+    body = json.loads(resp.read())
+    assert body["action"] == "arbitrated"
+    assert body["decision_id"] == 3
+
+
+def test_council_sin_decision_abierta_abre_una_nueva(ui_server_conn):
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(1, status="closed", ruling="yes")]
+    resp = _post(port, "/message", {"mode": "council", "body": "¿y ahora?"})
+    body = json.loads(resp.read())
+    assert body["action"] == "opened"
+    assert body["decision_id"] == 99
+    assert started["title"] == "¿y ahora?"
+    assert started["protocol"] == "adaptive"

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>MAGI — ClaMi</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="system">
+    <div class="magi" id="magi">
+      <div class="header left"><hr><hr><span>INQUIRY</span><hr><hr></div>
+      <div class="header right"><hr><hr><span>RESOLUTION</span><hr><hr></div>
+      <div class="connection casper-balthasar"></div>
+      <div class="connection casper-melchior"></div>
+      <div class="connection balthasar-melchior"></div>
+      <!-- wise-man / response / system-status / title los dibuja app.js -->
+    </div>
+
+    <div class="statusbar" id="statusbar">MAGI SYSTEM</div>
+
+    <div id="conversation"></div>
+
+    <div class="composer">
+      <div class="modes" id="modes">
+        <button data-mode="council" class="active">COUNCIL</button>
+        <button data-mode="chat">CHAT</button>
+      </div>
+      <textarea id="c-input" rows="3"
+        placeholder="Ask the council anything… Enter to send, Shift+Enter for a new line"></textarea>
+      <div class="composer-hint" id="c-status"></div>
+    </div>
+
+    <div id="history"></div>
+
+    <div class="modal" id="modal" hidden>
+      <div class="modal-header">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="close" id="modal-close">X</div>
+      </div>
+      <div class="modal-body"><div id="modal-content"></div></div>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
