@@ -2,7 +2,7 @@
   "mcpServers": {
     "debate": {
       "type": "stdio",
-      "command": "./debate-mcp/.venv/bin/python",
+      "command": "./debate-mcp/.venv/Scripts/python.exe",
       "args": ["./debate-mcp/server.py"],
       "env": {}
     }

@@ -11,3 +11,6 @@ memory.db*
 debate-mcp/launchd/backup/
 *.bak-*
 *.bak-original
+
+# repos de terceros clonados para evaluar (análisis en experiments/, no se versionan)
+experiments/

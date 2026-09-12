@@ -52,6 +52,12 @@ HEARTBEAT_CRIT_SECS = 3600
 GRAPH_WARN_SECS = 6 * 3600
 GRAPH_CRIT_SECS = 48 * 3600
 
+# Una decisión abierta durante horas es el mismo síntoma que el grafo
+# envejecido: el sistema está "vivo" pero trabado. Generosos con el arranque
+# (tres cabezas tardan lo suyo); un día entero abierto es un loop roto.
+DECISION_WARN_SECS = 2 * 3600
+DECISION_CRIT_SECS = 24 * 3600
+
 
 def _age_secs(ts: float) -> float:
     return time.time() - ts
@@ -127,22 +133,63 @@ def check_graph() -> tuple[str, str]:
     return OK, detail
 
 
+def check_decisions() -> tuple[str, str]:
+    """Decisiones abiertas: una que lleva horas sin cerrar suele ser una
+    cabeza que no votó o un relay que no la disparó. Postgres caído no se
+    reporta acá (ya lo hace check_postgres)."""
+    try:
+        with psycopg.connect(CONNINFO, connect_timeout=5) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, round, extract(epoch FROM now() - created_at) AS age_secs
+                FROM decisions
+                WHERE status = 'open'
+                ORDER BY created_at
+                """
+            ).fetchall()
+    except psycopg.OperationalError:
+        return OK, "postgres inalcanzable (lo reporta el check de postgres)"
+
+    if not rows:
+        return OK, "sin decisiones abiertas"
+    oldest_id, oldest_round, oldest_age = rows[0]
+    detail = (
+        f"{len(rows)} abierta(s); la más vieja hace {_human(oldest_age)} "
+        f"(#{oldest_id}, ronda {oldest_round})"
+    )
+    if oldest_age > DECISION_CRIT_SECS:
+        return CRIT, f"decisión trabada: {detail}"
+    if oldest_age > DECISION_WARN_SECS:
+        return WARN, f"decisión lenta en cerrar: {detail}"
+    return OK, detail
+
+
 CHECKS = [
     ("postgres", check_postgres),
     ("relay", check_relay),
+    ("decisions", check_decisions),
     ("memory-graph", check_graph),
 ]
 
 ICON = {OK: "ok  ", WARN: "WARN", CRIT: "CRIT"}
 
 
-def notify_macos(title: str, body: str) -> None:
+def notify(title: str, body: str) -> None:
+    """Aviso al operador cuando algo se rompe. macOS: notificación nativa vía
+    osascript. Windows: toast por PowerShell (BurntToast no viene de fábrica,
+    así que usamos el banner de consola — el healthcheck suele correr detrás
+    de una terminal o tarea; el texto queda en el log). Otros: stdout."""
     body = body.replace('"', "'")
     title = title.replace('"', "'")
-    subprocess.run(
-        ["osascript", "-e", f'display notification "{body}" with title "{title}"'],
-        capture_output=True,
-    )
+    if sys.platform == "darwin":
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{body}" with title "{title}"'],
+            capture_output=True,
+        )
+    elif sys.platform == "win32":
+        print(f"!! {title}: {body}")
+    else:
+        print(f"!! {title}: {body}")
 
 
 def main() -> int:
@@ -167,7 +214,7 @@ def main() -> int:
 
     if notify and worst != OK:
         bad = [f"{n}: {d}" for n, s, d in results if s != OK]
-        notify_macos(f"ClaMi {worst.upper()}", " | ".join(bad)[:200])
+        notify(f"ClaMi {worst.upper()}", " | ".join(bad)[:200])
 
     return _RANK[worst]
 
