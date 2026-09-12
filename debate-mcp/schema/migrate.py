@@ -20,9 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import psycopg  # noqa: E402
-
-from config import CONNINFO  # noqa: E402
+from config import connect  # noqa: E402
 
 SCHEMA_DIR = Path(__file__).resolve().parent
 RE_MIGRATION = re.compile(r"^(\d+)_(.+)\.sql$")
@@ -60,7 +58,7 @@ def main() -> int:
     status_only = "--status" in sys.argv
     migrations = discover()
 
-    with psycopg.connect(CONNINFO) as conn:
+    with connect() as conn:
         conn.execute(BOOTSTRAP)
         conn.commit()
         done = applied(conn)

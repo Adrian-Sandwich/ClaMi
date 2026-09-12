@@ -1,0 +1,29 @@
+{
+  "seats": [
+    {
+      "seat": "melchior",
+      "name": "kimi",
+      "type": "cli",
+      "bin": "~/.kimi-code/bin/kimi.exe",
+      "args": [
+        "-p"
+      ]
+    },
+    {
+      "seat": "balthasar",
+      "name": "qwen2.5:3b (ollama)",
+      "type": "api",
+      "model": "qwen2.5:3b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "timeout_secs": 600
+    },
+    {
+      "seat": "casper",
+      "name": "qwen2.5-coder:1.5b (ollama)",
+      "type": "api",
+      "model": "qwen2.5-coder:1.5b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "timeout_secs": 600
+    }
+  ]
+}

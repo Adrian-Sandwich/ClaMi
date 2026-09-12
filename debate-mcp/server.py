@@ -1,23 +1,37 @@
-"""Servidor MCP "debate": tablero de discusión persistente sobre Postgres.
+"""Servidor MCP "debate": tablero de discusión persistente sobre Postgres +
+motor de decisiones MAGI.
 
-Dos agentes CLI (Kimi y Claude Code) opinan como analistas sobre los artefactos
-del proyecto de trading. La persistencia y el fan-out en tiempo real los da
-Postgres: cada INSERT dispara pg_notify('debate_<thread>', id), así que
-`wait_messages` puede hacer LISTEN y despertar apenas llega un mensaje nuevo.
+Dos capas sobre la misma base:
+
+1. Primitivas del tablero (list_threads/read_thread/post_message/
+   wait_messages): un thread es un journal auditable. Cada INSERT dispara
+   pg_notify('debate_<thread>', id), así que wait_messages despierta por
+   LISTEN/NOTIFY sin polling.
+
+2. Decisiones MAGI (start_decision/cast_position/get_decision): la unidad de
+   trabajo es una Decisión — pregunta/artefacto sometido a las cabezas
+   (registry en heads.json, personas en personas.py, motor puro en
+   decision.py). Las cabezas debaten en el journal como messages normales
+   (kind='posicion') y votan posiciones estructuradas: el voto es dato, el
+   razonamiento es historia. El cierre lo decide el motor: mayoría 2/3,
+   minority report, y si no hay acuerdo, arbitraje humano — el sistema no
+   inventa consenso.
 """
 
-import sys
-from pathlib import Path
+import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import psycopg
+from psycopg import sql
+from psycopg.types.json import Json
+from mcp.server import MCPServer
 
-from mcp.server import MCPServer  # noqa: E402
-from psycopg import sql  # noqa: E402
+import decision
+import heads
+import board
 
-from config import connect  # noqa: E402
+from config import connect
 
-AUTHORS = {"kimi", "claude", "adrian"}
-KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje"}
+KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje", "posicion", "resultado", "contexto"}
 
 # tope del long-poll: no tiene sentido esperar más que esto en una sola llamada
 MAX_WAIT_SECS = 300
@@ -30,6 +44,13 @@ _CHANNEL_PREFIX = "debate_"
 MAX_THREAD_LEN = 63 - len(_CHANNEL_PREFIX.encode())
 
 mcp = MCPServer("debate")
+
+
+def _authors() -> set[str]:
+    """Autores válidos: los asientos del registry + adrian (superusuario
+    humano: abre decisiones y arbitra). Se recalcula por llamada: el registry
+    puede cambiar sin reiniciar el servidor."""
+    return set(heads.seat_names()) | {"adrian"}
 
 
 def _validate_thread(thread: str) -> None:
@@ -63,10 +84,11 @@ def list_threads() -> list[dict]:
 def read_thread(thread: str, since_id: int = 0, limit: int = 50) -> dict:
     """Lee mensajes de un thread con id > since_id, ordenados por id.
 
-    Protocolo del debate: roles kimi/claude (analistas) y adrian (árbitro
-    humano). kinds en orden — analisis (apertura) -> critica -> respuesta ->
-    veredicto (cierre de cada analista); arbitraje solo lo postea adrian si
-    hay desacuerdo tras los veredictos.
+    Protocolo del debate: los analistas son los asientos del registry (ver
+    heads.json / personas.py); adrian es el árbitro humano. Kinds:
+    analisis (apertura), critica/respuesta (debate libre), veredicto,
+    posicion (voto de una cabeza en una decisión), resultado (cierre de una
+    decisión), arbitraje (solo adrian, cierra una decisión split).
 
     Devuelve {"messages": [...], "has_more": bool, "max_id": int | None}.
     Si has_more es true, llamá de nuevo con since_id=messages[-1]["id"] —
@@ -112,9 +134,12 @@ def post_message(
     artifact es una referencia opcional al archivo/artefacto sobre el que
     opina el mensaje (ej. "src/paper.rs:120" o "experiments/plan.md") — no
     el contenido en sí, eso va en body.
+
+    kind='arbitraje' (solo adrian) además cierra la decisión cuyo journal es
+    este thread, si está 'split': el ruling humano queda en el body.
     """
-    if author not in AUTHORS:
-        raise ValueError(f"author inválido: {author!r} (válidos: {sorted(AUTHORS)})")
+    if author not in _authors():
+        raise ValueError(f"author inválido: {author!r} (válidos: {sorted(_authors())})")
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r} (válidos: {sorted(KINDS)})")
     _validate_thread(thread)
@@ -127,7 +152,18 @@ def post_message(
             """,
             (thread, author, kind, body, artifact),
         ).fetchone()
-    return {"id": row["id"]}
+        arbitrated = None
+        if kind == "arbitraje":
+            closed = conn.execute(
+                """
+                UPDATE decisions SET status = 'closed', closed_at = now()
+                WHERE thread = %s AND status = 'split'
+                RETURNING id
+                """,
+                (thread,),
+            ).fetchone()
+            arbitrated = closed["id"] if closed else None
+    return {"id": row["id"], "arbitrated_decision": arbitrated}
 
 
 @mcp.tool()
@@ -152,6 +188,98 @@ def wait_messages(thread: str, since_id: int, timeout_secs: int = 60) -> list[di
         for _notify in conn.notifies(timeout=timeout_secs, stop_after=1):
             break
         return _new_messages(conn, thread, since_id)
+
+
+@mcp.tool()
+def start_decision(
+    title: str,
+    artifact: str | None = None,
+    protocol: str = "vote",
+    created_by: str = "adrian",
+    seats: list[str] | None = None,
+) -> dict:
+    """Abre una decisión MAGI: las cabezas la investigan, debaten en el
+    journal y votan hasta ruling o arbitraje. Solo adrian abre decisiones.
+
+    protocol: 'vote' (una ronda; split → arbitraje), 'critique' (rondas de
+    crítica mutua hasta acuerdo o tope), 'adaptive' (vota; split 3-vías →
+    critique automático).
+
+    seats: asientos participantes (default: los activos del registry). Si un
+    asiento elegido no tiene binario, la decisión corre degradada y queda
+    anotado en 'degraded'.
+
+    El INSERT dispara NOTIFY al relay, que dispara a las cabezas faltantes.
+    """
+    with connect() as conn:
+        with conn.transaction():
+            return board.start_decision(
+                conn, title, artifact=artifact, protocol=protocol,
+                created_by=created_by, seats=seats,
+            )
+
+
+@mcp.tool()
+def cast_position(
+    decision_id: int,
+    author: str,
+    position: str,
+    body: str,
+    conditions: list[str] | None = None,
+) -> dict:
+    """Voto estructurado de una cabeza: publica el razonamiento en el journal
+    (kind='posicion') y registra la posición (yes/no/conditional/info) con
+    sus condiciones. El voto es dato; el razonamiento es historia.
+
+    Cuando la ronda queda completa, el motor cierra la decisión por mayoría,
+    abre la ronda de crítica siguiente, o la declara split (a arbitraje de
+    adrian). El UPDATE dispara NOTIFY y el relay redispára a las cabezas.
+    """
+    if author not in heads.seat_names():
+        raise ValueError(f"author inválido: {author!r} (asientos: {heads.seat_names()})")
+    if position not in decision.POSITIONS:
+        raise ValueError(f"position inválida: {position!r} (válidas: {list(decision.POSITIONS)})")
+    with connect() as conn:
+        with conn.transaction():
+            act, message_id = board.record_position(
+                conn, decision_id, author, position, body, conditions
+            )
+    return {"message_id": message_id, "action": act["action"]}
+
+
+@mcp.tool()
+def get_decision(decision_id: int) -> dict:
+    """El dossier de una decisión: estado, ronda, ruling, confidence,
+    minority report y todas las posiciones por ronda."""
+    with connect() as conn:
+        d = conn.execute(
+            "SELECT * FROM decisions WHERE id = %s", (decision_id,)
+        ).fetchone()
+        if d is None:
+            raise ValueError(f"decisión {decision_id} no existe")
+        positions = conn.execute(
+            """
+            SELECT head, round, position, conditions, message_id, created_at
+            FROM positions WHERE decision_id = %s
+            ORDER BY round, head
+            """,
+            (decision_id,),
+        ).fetchall()
+    out = dict(d)
+    out["heads"] = list(d["heads"])
+    for k in ("created_at", "closed_at"):
+        if out.get(k):
+            out[k] = out[k].isoformat()
+    out["positions"] = [
+        {
+            **p,
+            "conditions": list(p["conditions"]) if p["conditions"] else None,
+            "created_at": p["created_at"].isoformat(),
+        }
+        for p in (dict(r) for r in positions)
+    ]
+    out["mind_changes"] = decision.mind_changes(out["positions"])
+    return out
 
 
 def _new_messages(conn: psycopg.Connection, thread: str, since_id: int) -> list[dict]:

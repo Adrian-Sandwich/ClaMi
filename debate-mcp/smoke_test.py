@@ -17,6 +17,7 @@ para que el relay no lo tome como turno de nadie y no dispare agentes.
 Uso:  python smoke_test.py     (exit 0 = listo para migrar)
 """
 
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -31,6 +32,11 @@ from config import CONNINFO, connect  # noqa: E402
 
 THREAD = "__smoke__"
 _failures: list[str] = []
+
+# Windows: la consola heredada puede ser cp1252 y los nombres de los checks
+# usan → y tildes; forzamos utf-8 para que el reporte cruce plataformas.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def check(name: str):
@@ -125,11 +131,115 @@ def main() -> int:
             f"no llegó el NOTIFY global en 10s — ¿falta la migración 002_notify_all?"
         )
 
-    @check("binarios de los agentes")
+    @check("decisión MAGI: apertura → 3 votos → cierre por mayoría")
+    def _decision():
+        import json as _json
+
+        # asientos de mentira (sin binario): el relay no puede spawnearlos y
+        # nosotros votamos a mano. Toca env en vez de heads.json para no
+        # depender de la config real de la máquina.
+        os.environ["DEBATE_HEADS"] = _json.dumps({
+            "seats": [
+                {"seat": s, "name": "smoke", "type": "cli", "bin": None, "args": []}
+                for s in ("melchior", "balthasar", "casper")
+            ]
+        })
+        opened = server.start_decision(
+            title="smoke: ¿cierra por mayoría?",
+            protocol="vote",
+            seats=["melchior", "balthasar", "casper"],
+        )
+        did = opened["decision_id"]
+        try:
+            assert opened["thread"] == f"d{did}", f"thread {opened['thread']}"
+            assert opened["degraded"] == ["melchior", "balthasar", "casper"]
+
+            r1 = server.cast_position(did, "melchior", "yes", "evidencia de prueba")
+            assert r1["action"] == "wait", "con 1/3 votos no se cierra nada"
+            r2 = server.cast_position(did, "balthasar", "yes", "coincido")
+            assert r2["action"] == "wait", "con 2/3 sigue esperando al tercero"
+            r3 = server.cast_position(did, "casper", "no", "disiento a propósito")
+            assert r3["action"] == "close", "la mayoría 2/3 cierra la decisión"
+
+            d = server.get_decision(did)
+            assert d["status"] == "closed" and d["ruling"] == "yes"
+            assert d["confidence"] == 0.66, f"confidence {d['confidence']}"
+            minority = d["minority_report"]["minority"]
+            assert len(minority) == 1 and minority[0]["head"] == "casper"
+
+            journal = server.read_thread(thread=opened["thread"], since_id=0)
+            kinds = [m["kind"] for m in journal["messages"]]
+            assert "posicion" in kinds and "resultado" in kinds, f"kinds {kinds}"
+            return f"decisión {did} cerrada por mayoría 2/3, minority report ok"
+        finally:
+            with connect() as conn:
+                conn.execute("DELETE FROM positions WHERE decision_id = %s", (did,))
+                conn.execute("DELETE FROM decisions WHERE id = %s", (did,))
+                conn.execute("DELETE FROM messages WHERE thread = %s", (opened["thread"],))
+            os.environ.pop("DEBATE_HEADS", None)
+
+    @check("decisión MAGI con critique: split → ronda 2 → cierre con cambio de parecer")
+    def _decision_critique():
+        import json as _json
+
+        os.environ["DEBATE_HEADS"] = _json.dumps({
+            "seats": [
+                {"seat": s, "name": "smoke", "type": "cli", "bin": None, "args": []}
+                for s in ("melchior", "balthasar", "casper")
+            ]
+        })
+        opened = server.start_decision(
+            title="smoke: ¿critique cierra en la ronda 2?",
+            protocol="critique",
+            seats=["melchior", "balthasar", "casper"],
+        )
+        did = opened["decision_id"]
+        try:
+            # ronda 1: split 3-vías → el motor abre la ronda de crítica
+            assert server.cast_position(did, "melchior", "yes", "sí, hay evidencia")["action"] == "wait"
+            assert server.cast_position(did, "balthasar", "no", "no me convence")["action"] == "wait"
+            r = server.cast_position(did, "casper", "conditional", "depende del egress")
+            assert r["action"] == "next_round", "split 3-vías en critique abre ronda 2"
+            assert server.get_decision(did)["round"] == 2
+
+            # ronda 2: una se alinea, una se mantiene
+            server.cast_position(did, "melchior", "yes", "me mantengo")
+            server.cast_position(did, "balthasar", "yes", "melchior tiene razón sobre el egress")
+            r = server.cast_position(did, "casper", "no", "sigo en no")
+            assert r["action"] == "close"
+
+            d = server.get_decision(did)
+            assert d["status"] == "closed" and d["ruling"] == "yes"
+            # cambiaron los dos que modificaron su posición entre rondas:
+            # balthasar se alineó y casper endureció su conditional a no
+            assert d["mind_changes"] == [
+                {"head": "balthasar", "from": "no", "to": "yes", "round": 2},
+                {"head": "casper", "from": "conditional", "to": "no", "round": 2},
+            ], f"mind_changes {d['mind_changes']}"
+            assert d["minority_report"]["mind_changes"] == d["mind_changes"]
+            return f"decisión {did}: split → ronda 2 → cierre con 1 cambio de parecer"
+        finally:
+            with connect() as conn:
+                conn.execute("DELETE FROM positions WHERE decision_id = %s", (did,))
+                conn.execute("DELETE FROM decisions WHERE id = %s", (did,))
+                conn.execute("DELETE FROM messages WHERE thread = %s", (opened["thread"],))
+            os.environ.pop("DEBATE_HEADS", None)
+
+    @check("asientos del registry activos")
     def _bins():
-        missing = [b for b in (relay.CLAUDE_BIN, relay.KIMI_BIN) if not Path(b).exists()]
-        assert not missing, f"no existen: {missing}"
-        return "claude y kimi presentes"
+        # Antes verificaba relay.CLAUDE_BIN/KIMI_BIN, atributos que dejaron de
+        # existir cuando los asientos se mudaron al registry (heads.json): el
+        # binario es propiedad del asiento, no del relay. Hoy la pregunta del
+        # smoke es que cada asiento configurado pueda dispararse de verdad.
+        import heads  # noqa: E402
+
+        seats = heads.load()
+        assert seats, "registry vacío: heads.json sin asientos"
+        inactive = [s["seat"] for s in seats if not heads.is_active(s)]
+        assert not inactive, f"asientos sin binario ni endpoint: {inactive}"
+        return ", ".join(
+            f"{s['seat']}({s.get('name') or s.get('model') or '?'})" for s in seats
+        )
 
     @check("relay: cwd derivado del artifact")
     def _cwd():
