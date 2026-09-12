@@ -17,7 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Postgres (tablero de debate) ---------------------------------------
-DEFAULT_CONNINFO = "dbname=debate user=adrianmedina host=localhost"
+DEFAULT_CONNINFO = "dbname=debate host=localhost"
 CONNINFO = os.environ.get("DEBATE_CONNINFO", DEFAULT_CONNINFO)
 
 # --- SQLite propio -------------------------------------------------------
@@ -43,11 +43,11 @@ CODE_CACHE_DIR = Path(
 # --- Docs a ingestar -----------------------------------------------------
 # Lista de globs, no de archivos: antes había que editar el .py para sumar un
 # documento, y los README del propio monorepo nunca entraron al grafo.
+# El default sólo incluye los READMEs de ESTE repo (portable: correr en
+# cualquier máquina no exige tener el checkout de un proyecto particular).
+# Para sumar docs de otros proyectos, MEMORY_GRAPH_DOCS (JSON o lista
+# separada por ':') y MEMORY_GRAPH_DOC_ROOTS.
 DEFAULT_DOC_GLOBS = [
-    "/Users/adrianmedina/src/trade/CLAUDE.md",
-    "/Users/adrianmedina/src/trade/README.md",
-    "/Users/adrianmedina/src/trade/experiments/*.md",
-    "/Users/adrianmedina/src/trade/data/paper/report.md",
     str(REPO_ROOT / "README.md"),
     str(REPO_ROOT / "*" / "README.md"),
 ]
@@ -56,7 +56,7 @@ DEFAULT_DOC_GLOBS = [
 # las referencias relativas dentro del doc apunten al repo correcto.
 DOC_ROOTS = [
     Path(p) for p in os.environ.get(
-        "MEMORY_GRAPH_DOC_ROOTS", f"/Users/adrianmedina/src/trade:{REPO_ROOT}"
+        "MEMORY_GRAPH_DOC_ROOTS", str(REPO_ROOT)
     ).split(":") if p
 ]
 

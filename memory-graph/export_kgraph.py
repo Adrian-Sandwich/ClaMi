@@ -32,6 +32,7 @@ DOMAIN_COLORS = {
     "claude_session": "#7b8cff",
     "kimi_session": "#b07bff",
     "debate_thread": "#ff7bd5",
+    "decision": "#ff9f1c",
     "doc": "#ffd166",
     "file": "#ef476f",
     "code": "#06d6a0",

@@ -122,3 +122,49 @@ def test_gc_orphans_no_toca_sesiones_aisladas(graph_db):
     db.upsert_node(graph_db, id="s1", domain="claude_session", source="c", updated_at=NOW)
     assert db.gc_orphans(graph_db) == 0
     assert _node(graph_db, "s1") is not None
+
+
+# ------------------------------------------------------------ ingest_debate
+
+def test_write_decision_crea_nodo_con_dossier_y_edge_journal_of(graph_db):
+    """ingest_debate.write_decision: nodo decision con ruling/minority/
+    mind_changes en props, y edge journal_of desde el thread. Idempotente."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    import ingest_debate
+
+    row = {
+        "id": 7,
+        "title": "¿Hubo SQLi?",
+        "protocol": "critique",
+        "status": "closed",
+        "ruling": "yes",
+        "confidence": 0.66,
+        "minority_report": {
+            "minority": [{"head": "casper", "position": "no", "conditions": None}],
+            "mind_changes": [{"head": "balthasar", "from": "no", "to": "yes", "round": 2}],
+            "degraded": False,
+        },
+        "thread": "d7",
+        "round": 2,
+        "created_by": "adrian",
+        "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "closed_at": None,
+    }
+    ingest_debate.write_decision(graph_db, row, NOW)
+
+    node = _node(graph_db, "decision:7")
+    assert node is not None
+    assert node[3] == "decision"
+    props = _json.loads(node[4])
+    assert props["ruling"] == "yes"
+    assert props["mind_changes"][0]["head"] == "balthasar"
+    edge = graph_db.execute(
+        "SELECT type FROM edges WHERE from_id = 'debate_thread:d7' AND to_id = 'decision:7'"
+    ).fetchone()
+    assert edge == ("journal_of",)
+
+    ingest_debate.write_decision(graph_db, row, NOW)
+    n = graph_db.execute("SELECT count(*) FROM nodes WHERE domain = 'decision'").fetchone()[0]
+    assert n == 1, "dos corridas no duplican el nodo"

@@ -23,7 +23,9 @@ def read_jsonl(path: Path, facts: "Facts"):
     """Itera los registros JSON de un log, contando las líneas rotas en vez de
     cortar la ingesta. Los transcripts se escriben mientras el agente trabaja:
     una línea truncada al final es normal, no un error."""
-    with path.open(errors="replace") as f:
+    # encoding="utf-8" explícito: en Windows el default del locale no es UTF-8
+    # y los transcripts/logs con tildes se corrompen.
+    with path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:

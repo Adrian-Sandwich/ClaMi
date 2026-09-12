@@ -10,7 +10,7 @@ SQLite propio (`memory.db`) y exporta un `.kgraph.json` para el visor 3D de
 |---|---|---|
 | `ingest_claude.py` | `~/.claude/projects/**/*.jsonl` | `claude_session` |
 | `ingest_kimi.py` | `~/.kimi-code/sessions/wd_*/session_*/agents/*/wire.jsonl` | `kimi_session` |
-| `ingest_debate.py` | tabla `messages` de Postgres | `debate_thread` |
+| `ingest_debate.py` | tablas `messages` + `decisions` de Postgres | `debate_thread`, `decision` |
 | `ingest_docs.py` | globs de `.md` configurables | `doc` |
 | `ingest_code.py` | SQLite de codebase-memory-mcp | `code` |
 

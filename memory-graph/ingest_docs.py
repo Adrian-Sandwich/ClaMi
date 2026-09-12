@@ -64,7 +64,7 @@ def main() -> None:
     for path in discover_docs():
         # cada doc resuelve sus referencias contra el repo al que pertenece
         project_root = settings.project_root_for(path)
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
         did = doc_id(path)
         seen.add(did)
         title = text.splitlines()[0].lstrip("# ").strip() if text else path.name

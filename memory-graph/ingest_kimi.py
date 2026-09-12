@@ -30,7 +30,7 @@ SESSIONS_DIR = KIMI_HOME / "sessions"
 
 
 def load_workspaces() -> dict:
-    data = json.loads((KIMI_HOME / "workspaces.json").read_text())
+    data = json.loads((KIMI_HOME / "workspaces.json").read_text(encoding="utf-8"))
     return {slug: w["root"] for slug, w in data.get("workspaces", {}).items()}
 
 
@@ -67,6 +67,10 @@ def extract_agent_facts(path: Path) -> dict:
 
         args = ev.get("args") or {}
         facts.touch_from(args)
+        # Sólo entran tools cuyo arg es `thread`. Los de decisiones
+        # (start_decision/cast_position/get_decision) nombran decision_id, no
+        # thread — igual no se pierde el vínculo: las cabezas leen el journal
+        # con read_thread antes de votar, y ese sí queda anotado.
         if ev.get("name") in ("post_message", "read_thread", "wait_messages") and "thread" in args:
             facts.note_thread(args["thread"])
 

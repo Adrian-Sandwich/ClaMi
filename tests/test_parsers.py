@@ -147,3 +147,21 @@ def test_canary_workspaces_de_kimi_resuelven(real_kimi_logs):
         f"ninguno de los {len(dirs)} workspaces en disco aparece en workspaces.json: "
         f"todas las sesiones de Kimi se estarían descartando"
     )
+
+
+def test_canary_kimi_sigue_detectando_threads_del_tablero(real_kimi_logs):
+    """Las sesiones conectan con el grafo vía edges posted_to, que salen de
+    detectar las llamadas a los tools del tablero (read_thread/post_message/
+    wait_messages). Si los tools se renombran o el MCP deja de llamarse
+    'debate', los threads quedan huérfanos sin ruido. Este canario lo hace
+    ruidoso: sólo se salta solo donde el tablero jamás se usó."""
+    all_wires = list(real_kimi_logs.glob("wd_*/session_*/agents/*/wire.jsonl"))
+    if not any(ingest_kimi.extract_agent_facts(p)["threads"] for p in all_wires):
+        pytest.skip("ningún wire usa el tablero: canario sin datos en esta máquina")
+
+    recent = sorted(all_wires, key=lambda p: -p.stat().st_mtime)[:40]
+    parsed = [ingest_kimi.extract_agent_facts(p) for p in recent]
+    assert sum(len(f["threads"]) for f in parsed) > 0, (
+        "ningún thread del tablero en los 40 wires más recientes, pero sí en "
+        "el histórico: ¿cambiaron los nombres de los tools del MCP o el campo de args?"
+    )
