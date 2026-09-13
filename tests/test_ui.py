@@ -312,9 +312,10 @@ def test_post_con_token_falso_devuelve_403(ui_server):
     resp.read()
 
 
-def test_get_fs_y_events_sin_token_devuelven_403(ui_server_conn):
+def test_get_fs_state_y_events_sin_token_devuelven_403(ui_server_conn):
     port, _, _ = ui_server_conn
     assert _get_raw(port, "/fs").status == 403
+    assert _get_raw(port, "/state").status == 403
     assert _get_raw(port, f"/events?token=bogus").status == 403
     resp = _get_raw(port, "/events")
     assert resp.status == 403

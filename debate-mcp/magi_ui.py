@@ -377,6 +377,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._fs()
         elif path == "/state":
+            if not self._token_ok():
+                self._send_json({"error": "token inválido o ausente"}, 403)
+                return
             with connect() as conn:
                 self._send_json(build_state(conn))
         elif path == "/events":
