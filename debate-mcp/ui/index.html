@@ -28,19 +28,23 @@
       </div>
       <div class="intent" id="c-intent"></div>
       <div class="stalemate-actions" id="stalemate-actions" hidden>
-        <span>The council disagrees — it's your call:</span>
+        <span>the council disagrees — it's your call:</span>
         <button id="sa-ruling">close with my ruling</button>
-        <button id="sa-segui">seguí — one more round</button>
+        <button id="sa-segui">seguí</button>
       </div>
       <textarea id="c-input" rows="3"
         placeholder="Ask the council anything… Enter to send, Shift+Enter for a new line"></textarea>
       <div class="composer-opts">
-        <label class="prod-toggle"><input type="checkbox" id="c-prod-toggle">
-          <span>production run</span></label>
-        <span class="prod-help" id="prod-help" hidden>the council approves a plan → an
-          executor implements it in branch <code>magi/d&lt;n&gt;</code> → the council reviews
-          the diff → merges if unanimous</span>
-        <input id="c-repo" placeholder="repo folder (e.g. C:\src\my-repo)" hidden>
+        <input id="c-repo" placeholder="repo folder (optional — pick or type)">
+        <button id="c-browse" title="browse folders">📂</button>
+      </div>
+      <div class="fs-panel" id="fs-panel" hidden>
+        <div class="fs-bar">
+          <button id="fs-up" hidden>⬆ up</button>
+          <span id="fs-path"></span>
+          <button id="fs-use">✓ use this folder</button>
+        </div>
+        <div class="fs-list" id="fs-list"></div>
       </div>
       <div class="composer-hint" id="c-status"></div>
     </div>

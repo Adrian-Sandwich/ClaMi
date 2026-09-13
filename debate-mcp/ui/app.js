@@ -179,23 +179,18 @@ function renderHistory() {
 // qué hará mi mensaje": la UI anticipa la acción antes de que la escribas.
 function renderIntent(d) {
   const el = document.getElementById("c-intent");
-  const prodOn = document.getElementById("c-prod-toggle").checked;
-  const repoSet = document.getElementById("c-repo").value.trim().length > 0;
+  const repo = document.getElementById("c-repo").value.trim();
   let txt;
   if (uiMode === "chat") {
     txt = "↳ Enter talks to the three heads in the open thread — no vote, just their takes.";
   } else if (!d) {
-    if (prodOn && !repoSet) {
-      txt = "↳ production is on — write the repo folder below so the executor knows where to work.";
-    } else {
-      txt = prodOn
-        ? `↳ Enter opens a PRODUCTION decision on ${document.getElementById("c-repo").value.trim()} — the council votes a plan, an executor implements it, the council reviews the diff.`
-        : "↳ Enter opens a NEW decision — the council investigates and votes. Nothing open right now.";
-    }
+    txt = repo
+      ? `↳ Enter opens a PRODUCTION decision on ${repo} — the council votes your plan, an executor implements it there, the council reviews the diff.`
+      : "↳ Enter opens a NEW decision — the council investigates and votes. Put a repo folder below to also have the approved plan executed there.";
   } else if (d.status === "open") {
     txt = `↳ Enter adds CONTEXT to #${d.id} — the heads read it on their next turn (${d.round}° round).`;
   } else if (d.status === "split") {
-    txt = `↳ Enter closes #${d.id} with YOUR ruling — or write "seguí" (+ context) to reopen the debate.`;
+    txt = `↳ Enter closes #${d.id} with YOUR ruling — o escribí "seguí" para otra ronda.`;
   } else if (d.status === "executing") {
     txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
   } else {
@@ -231,10 +226,52 @@ document.getElementById("sa-ruling").addEventListener("click", () => {
 });
 
 // --- toggle production: el repo y la explicación sólo aparecen cuando aplica
-document.getElementById("c-prod-toggle").addEventListener("change", ev => {
-  const on = ev.target.checked;
-  document.getElementById("c-repo").hidden = !on;
-  document.getElementById("prod-help").hidden = !on;
+document.getElementById("c-repo").addEventListener("input", render);
+
+// --- mini-explorador de carpetas: elegir el repo sin tipear paths
+let fsCurrent = null;
+
+async function fsLoad(path) {
+  const url = path ? `/fs?path=${encodeURIComponent(path)}` : "/fs";
+  const resp = await fetch(url);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || resp.statusText);
+  fsCurrent = data.path;
+  document.getElementById("fs-path").textContent = data.path;
+  document.getElementById("fs-up").hidden = !data.parent;
+  document.getElementById("fs-list").innerHTML = data.dirs.length
+    ? data.dirs.map(d =>
+        `<span class="dir" data-path="${esc(d.path)}">${d.git ? '<span class="git-star">★</span>' : "▸"} ${esc(d.name)}</span>`
+      ).join("")
+    : '<span class="dir">(sin subcarpetas)</span>';
+  document.querySelectorAll("#fs-list .dir[data-path]").forEach(el =>
+    el.addEventListener("click", () => fsLoad(el.dataset.path).catch(err => {
+      document.getElementById("c-status").textContent = `error: ${err.message}`;
+    })));
+}
+
+document.getElementById("c-browse").addEventListener("click", async () => {
+  const panel = document.getElementById("fs-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) {
+    try {
+      await fsLoad(document.getElementById("c-repo").value.trim() || null);
+    } catch (err) {
+      panel.hidden = true;
+      document.getElementById("c-status").textContent = `error: ${err.message}`;
+    }
+  }
+});
+
+document.getElementById("fs-up").addEventListener("click", async () => {
+  const resp = await fetch(`/fs?path=${encodeURIComponent(fsCurrent)}`);
+  const data = await resp.json();
+  if (data.parent) await fsLoad(data.parent);
+});
+
+document.getElementById("fs-use").addEventListener("click", () => {
+  document.getElementById("c-repo").value = fsCurrent;
+  document.getElementById("fs-panel").hidden = true;
   render();
 });
 
@@ -291,10 +328,9 @@ async function send() {
   const body = input.value.trim();
   if (!body) return;
   const payload = { mode: uiMode, body };
-  // producción: repo + flag viajan con la consulta que abre la decisión
-  const prodOn = document.getElementById("c-prod-toggle").checked;
+  // con repo, production es siempre: lo aprobado se ejecuta ahí
   const repo = document.getElementById("c-repo").value.trim();
-  if (uiMode === "council" && prodOn && repo) {
+  if (uiMode === "council" && repo) {
     payload.artifact = repo;
     payload.production = true;
   }

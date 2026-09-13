@@ -243,6 +243,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("style.css", "text/css; charset=utf-8")
         elif self.path == "/app.js":
             self._send_file("app.js", "text/javascript; charset=utf-8")
+        elif self.path.startswith("/fs"):
+            self._fs()
         elif self.path == "/state":
             with connect() as conn:
                 self._send_json(build_state(conn))
@@ -250,6 +252,38 @@ class Handler(BaseHTTPRequestHandler):
             self._events()
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _fs(self) -> None:
+        """Mini-explorador de carpetas para elegir el repo sin tipear paths.
+        Sólo corre en localhost y solo lista directorios — nunca archivos.
+        Los que tienen .git se marcan: son candidatos naturales de repo."""
+        from urllib.parse import urlparse, parse_qs
+        query = parse_qs(urlparse(self.path).query)
+        raw = (query.get("path") or [str(Path.home())])[0]
+        p = Path(raw)
+        if not p.is_dir():
+            self._send_json({"error": f"{raw} no es una carpeta"}, 400)
+            return
+        try:
+            dirs = []
+            for c in sorted(p.iterdir()):
+                if c.name.startswith("."):
+                    continue
+                if c.is_dir():
+                    dirs.append({
+                        "name": c.name, "path": str(c),
+                        "git": (c / ".git").exists(),
+                    })
+                if len(dirs) >= 200:
+                    break
+        except OSError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+        self._send_json({
+            "path": str(p),
+            "parent": str(p.parent) if p.parent != p else None,
+            "dirs": dirs,
+        })
 
     def _events(self) -> None:
         self.send_response(200)
@@ -310,6 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                         title=payload.get("title", ""),
                         artifact=payload.get("artifact"),
                         protocol=payload.get("protocol") or "vote",
+                        production=bool(payload.get("artifact")),
                     )
             self._send_json(result, 201)
         except ValueError as exc:
@@ -390,14 +425,16 @@ class Handler(BaseHTTPRequestHandler):
                         """
                     ).fetchone()
                     if d is None:
+                        # con artefacto (repo), production es siempre: lo
+                        # aprobado se ejecuta ahí. Sin repo, decisión común.
                         result = board.start_decision(
                             conn, title=body,
                             artifact=payload.get("artifact"),
                             protocol=payload.get("protocol") or "adaptive",
-                            production=bool(payload.get("production")),
+                            production=bool(payload.get("artifact")),
                         )
                         result = {**result, "kind": "decision", "action": "opened",
-                                  "production": bool(payload.get("production"))}
+                                  "production": bool(payload.get("artifact"))}
                     else:
                         result = board.human_message(conn, d["thread"], body)
                         if result.get("reopened_decision"):

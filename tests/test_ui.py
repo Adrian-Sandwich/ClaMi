@@ -433,3 +433,32 @@ def test_post_abort_cierra_la_decision(ui_server_conn, monkeypatch):
     assert resp.status == 200
     assert body == {"aborted": 2, "thread": "d2"}
     assert calls["id"] == 2
+
+
+def test_council_con_repo_implica_production_siempre(ui_server_conn):
+    """Con artefacto, production es siempre: lo aprobado se ejecuta ahí.
+    El flag del payload se ignora — el checkbox desapareció de la UI."""
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(1, status="closed", ruling="yes")]
+    resp = _post(port, "/message", {"mode": "council", "body": "hacer X",
+                                    "artifact": "C:/repo"})
+    body = json.loads(resp.read())
+    assert resp.status == 201
+    assert body["production"] is True
+    assert started["production"] is True
+    assert started["artifact"] == "C:/repo"
+
+
+def test_fs_lista_carpetas_y_marca_repos(ui_server_conn, tmp_path):
+    """El mini-explorador: lista subcarpetas y marca las que tienen .git."""
+    (tmp_path / "proyecto-a").mkdir()
+    (tmp_path / "proyecto-b").mkdir()
+    (tmp_path / "proyecto-b" / ".git").mkdir()
+    port, _, _ = ui_server_conn
+    resp = _get(port, f"/fs?path={tmp_path}")
+    assert resp.status == 200
+    data = json.loads(resp.read())
+    assert data["path"] == str(tmp_path)
+    assert data["parent"] == str(tmp_path.parent)
+    marcas = {d["name"]: d["git"] for d in data["dirs"]}
+    assert marcas == {"proyecto-a": False, "proyecto-b": True}

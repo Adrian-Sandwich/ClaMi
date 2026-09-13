@@ -470,6 +470,81 @@ body {
     color: #ff8d00;
 }
 
+.composer .composer-opts #c-browse {
+    background: black;
+    border: 1px solid #7a5a2e;
+    color: #ff8d00;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 8px;
+}
+
+.composer .composer-opts #c-browse:hover {
+    border-color: #ff8d00;
+}
+
+.fs-panel {
+    border: 1px solid #7a5a2e;
+    margin-top: 4px;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+}
+
+.fs-panel .fs-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #7a5a2e;
+    color: #ff8d00;
+}
+
+.fs-panel .fs-bar span {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fs-panel button {
+    background: black;
+    border: 1px solid #7a5a2e;
+    color: #ff8d00;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 8px;
+}
+
+.fs-panel button:hover {
+    border-color: #ff8d00;
+}
+
+.fs-panel .fs-list {
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.fs-panel .fs-list .dir {
+    display: block;
+    padding: 3px 10px;
+    color: #d8b98a;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fs-panel .fs-list .dir:hover {
+    background: #1f1203;
+    color: #ff8d00;
+}
+
+.fs-panel .fs-list .dir .git-star {
+    color: #52e691;
+    margin-right: 4px;
+}
+
 .composer .intent {
     color: #b0762a;
     font-family: 'Lucida Console', monospace;
