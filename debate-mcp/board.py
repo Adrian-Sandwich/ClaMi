@@ -23,8 +23,14 @@ def start_decision(
     protocol: str = "vote",
     created_by: str = "adrian",
     seats: list[str] | None = None,
+    production: bool = False,
 ) -> dict:
-    """Abre una decisión MAGI. El llamador maneja la transacción."""
+    """Abre una decisión MAGI. El llamador maneja la transacción.
+
+    production=true la marca como decisión de plan con ejecución: si el
+    consejo la aprueba (ruling yes/conditional), pasa a 'executing' y el
+    relay lanza al ejecutor (modo producción) en vez de cerrarla.
+    """
     if created_by != "adrian":
         raise ValueError("solo adrian abre decisiones")
     if protocol not in decision.PROTOCOLS:
@@ -45,11 +51,11 @@ def start_decision(
     provisional = f"_opening-{uuid.uuid4().hex[:12]}"
     row = conn.execute(
         """
-        INSERT INTO decisions (title, artifact, protocol, thread, heads, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO decisions (title, artifact, protocol, thread, heads, created_by, production)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (title, artifact, protocol, provisional, Json(participating), created_by),
+        (title, artifact, protocol, provisional, Json(participating), created_by, production),
     ).fetchone()
     did = row["id"]
     thread = f"d{did}"
@@ -126,21 +132,41 @@ def record_position(
     act = decision.advance(d, positions)
     if act["action"] == "close":
         act["mind_changes"] = decision.mind_changes(positions)
-        conn.execute(
-            """
-            UPDATE decisions
-            SET status = 'closed', ruling = %s, confidence = %s,
-                minority_report = %s, closed_at = now()
-            WHERE id = %s
-            """,
-            (act["ruling"], act["confidence"],
-             Json({
-                 "minority": act["minority"],
-                 "degraded": act.get("degraded", False),
-                 "mind_changes": act["mind_changes"],
-             }),
-             decision_id),
-        )
+        if decision.debe_ejecutar(d, act):
+            # modo producción: no es un cierre, es el pase a ejecución. El
+            # relay detecta 'executing', lanza al ejecutor en la rama
+            # magi/d<id> y al terminar abre la revisión del diff.
+            conn.execute(
+                """
+                UPDATE decisions
+                SET status = 'executing', ruling = %s, confidence = %s,
+                    minority_report = %s
+                WHERE id = %s
+                """,
+                (act["ruling"], act["confidence"],
+                 Json({
+                     "minority": act["minority"],
+                     "degraded": act.get("degraded", False),
+                     "mind_changes": act["mind_changes"],
+                 }),
+                 decision_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE decisions
+                SET status = 'closed', ruling = %s, confidence = %s,
+                    minority_report = %s, closed_at = now()
+                WHERE id = %s
+                """,
+                (act["ruling"], act["confidence"],
+                 Json({
+                     "minority": act["minority"],
+                     "degraded": act.get("degraded", False),
+                     "mind_changes": act["mind_changes"],
+                 }),
+                 decision_id),
+            )
     elif act["action"] == "next_round":
         conn.execute(
             "UPDATE decisions SET round = %s WHERE id = %s",
@@ -155,12 +181,16 @@ def record_position(
             (Json({"minority": act["minority"]}), decision_id),
         )
     if act["action"] in ("close", "split"):
+        if decision.debe_ejecutar(d, act):
+            body = decision.resultado_ejecucion_texto(d, act)
+        else:
+            body = decision.resultado_text(d, act)
         conn.execute(
             """
             INSERT INTO messages (thread, author, kind, body, artifact)
             VALUES (%s, 'magi', 'resultado', %s, NULL)
             """,
-            (d["thread"], decision.resultado_text(d, act)),
+            (d["thread"], body),
         )
     if act["action"] == "split":
         # Destrabe: el split no es un callejón sin salida. El consejo le
@@ -219,6 +249,17 @@ def human_message(conn, thread: str, body: str) -> dict:
         kind = "arbitraje"
     elif d is not None and d["status"] == "split":
         kind = "contexto"
+    elif d is not None and d["status"] == "executing":
+        # reintento de ejecución: "seguí" borra la marca de fallo y el
+        # relay vuelve a lanzar al ejecutor en su próximo ciclo.
+        kind = "contexto"
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE thread = %s AND kind = 'resultado' AND body LIKE 'EJECUCIÓN FALLIDA%%'
+            """,
+            (thread,),
+        )
     elif d is not None:
         kind = "contexto"
     else:

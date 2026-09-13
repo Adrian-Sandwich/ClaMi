@@ -14,6 +14,8 @@ El cierre espera las posiciones de TODOS los asientos participantes de la
 ronda: el minority report sólo es completo si las tres cabezas votaron.
 """
 
+import re as _re
+
 POSITIONS = ("yes", "no", "conditional", "info")
 PROTOCOLS = ("vote", "critique", "adaptive")
 MAX_ROUNDS = 3
@@ -226,3 +228,56 @@ def resultado_text(decision: dict, outcome: dict) -> str:
             "author='adrian', kind='arbitraje', body=<tu ruling y justificación>)."
         )
     raise ValueError(f"outcome sin texto: {outcome['action']}")
+
+
+# ------------------------------------------------------------ modo producción
+# Ciclo completo: deliberar (protocolos de siempre) → al aprobarse un plan de
+# decisión production, ejecutar (un ejecutor implementa en la rama magi/d<N>)
+# → revisar (una decisión normal sobre el diff) → mergear si el consejo
+# aprueba unánime. Las funciones de acá son puras: la ejecución vive en el
+# relay, el estado en board.
+
+RE_REVIEW = _re.compile(r"^Revisar implementación de #(\d+)", _re.IGNORECASE)
+
+
+def debe_ejecutar(d: dict, act: dict) -> bool:
+    """Un cierre de plan dispara ejecución sólo si la decisión es production
+    y el ruling es aprobatorio (yes o conditional — las condiciones van en el
+    prompt del ejecutor)."""
+    return (
+        bool(d.get("production"))
+        and act.get("action") == "close"
+        and act.get("ruling") in ("yes", "conditional")
+    )
+
+
+def rama_ejecucion(decision_id) -> str:
+    """La rama donde el ejecutor trabaja: derivable del id, auditable."""
+    return f"magi/d{decision_id}"
+
+
+def revision_de(titulo: str):
+    """Si el título es el de una revisión de ejecución, devuelve el id de la
+    decisión original que implementa (para saber qué rama mergear)."""
+    m = RE_REVIEW.match(titulo or "")
+    return int(m.group(1)) if m else None
+
+
+def resultado_ejecucion_texto(d: dict, act: dict) -> str:
+    """El 'resultado' cuando un plan production es aprobado: no es un cierre,
+    es el pase a ejecución."""
+    minor = act.get("minority") or []
+    minor_txt = ""
+    if minor:
+        detalle = "; ".join(
+            f"{m['head']} votó {m['position']}"
+            + (f" ({', '.join(m['conditions'])})" if m.get("conditions") else "")
+            for m in minor
+        )
+        minor_txt = f" Minority report: {detalle}."
+    return (
+        f"PLAN APROBADO (confidence {act['confidence']}).{minor_txt} "
+        f"Pasando a ejecución: el ejecutor trabaja en la rama "
+        f"{rama_ejecucion(d['id'])} sobre {d.get('artifact') or 'el repositorio'}; "
+        f"al terminar se abre la revisión del diff."
+    )

@@ -207,18 +207,27 @@ async function send() {
   const input = document.getElementById("c-input");
   const body = input.value.trim();
   if (!body) return;
+  const payload = { mode: uiMode, body };
+  // producción: repo + flag viajan con la consulta que abre la decisión
+  const repo = document.getElementById("c-repo").value.trim();
+  if (uiMode === "council" && repo) {
+    payload.artifact = repo;
+    payload.production = document.getElementById("c-prod").checked;
+  }
   status.textContent = "sending…";
   try {
     const resp = await fetch("/message", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: uiMode, body }),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     if (data.action === "opened") {
       focusedId = data.decision_id;
-      status.textContent = `decision #${data.decision_id} opened — the council is deliberating`;
+      status.textContent = data.production
+        ? `production decision #${data.decision_id} opened — approve the plan and an executor implements it`
+        : `decision #${data.decision_id} opened — the council is deliberating`;
     } else if (data.action === "reopened") {
       status.textContent = `decision #${data.decision_id} reopened — the heads recast with your context`;
     } else if (data.action === "arbitrated") {

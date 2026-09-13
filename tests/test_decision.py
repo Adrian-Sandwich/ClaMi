@@ -447,3 +447,35 @@ def test_consulta_de_destrabe_announce_ambas_vias():
     assert "melchior=yes" in txt
     assert "balthasar=no (rollback)" in txt
     assert "seguí" in txt and "ruling" in txt
+
+
+# ------------------------------------------------------------ modo producción
+
+def test_debe_ejecutar_solo_production_aprobatoria():
+    d = mk_decision()
+    act = {"action": "close", "ruling": "yes", "confidence": 0.66, "minority": []}
+    assert decision.debe_ejecutar(d, act) is False, "sin production no ejecuta"
+    dp = mk_decision(production=True)
+    assert decision.debe_ejecutar(dp, act) is True
+    act_no = {"action": "close", "ruling": "no", "confidence": 0.66, "minority": []}
+    assert decision.debe_ejecutar(dp, act_no) is False, "rechazado no ejecuta"
+    act_split = {"action": "split", "minority": []}
+    assert decision.debe_ejecutar(dp, act_split) is False
+
+
+def test_rama_y_revision_derivables_del_id():
+    assert decision.rama_ejecucion(7) == "magi/d7"
+    assert decision.revision_de("Revisar implementación de #7: algo") == 7
+    assert decision.revision_de("otra cosa") is None
+
+
+def test_resultado_ejecucion_anuncia_la_rama():
+    d = mk_decision(id=7, production=True, artifact="/repo")
+    txt = decision.resultado_ejecucion_texto(d, {
+        "ruling": "conditional", "confidence": 0.66,
+        "minority": [{"head": "casper", "position": "no",
+                      "conditions": ["con tests"]}],
+    })
+    assert "PLAN APROBADO" in txt
+    assert "magi/d7" in txt
+    assert "con tests" in txt

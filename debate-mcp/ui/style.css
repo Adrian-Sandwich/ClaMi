@@ -428,6 +428,39 @@ body {
     min-height: 14px;
 }
 
+.composer .composer-opts {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-top: 6px;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+}
+
+.composer .composer-opts input[type="text"],
+.composer .composer-opts #c-repo {
+    flex: 1;
+    background: #1f1203;
+    border: 1px solid #7a5a2e;
+    color: #ff8d00;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+}
+
+.composer .prod-toggle {
+    color: #7a5a2e;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.composer .prod-toggle input:checked + span {
+    color: #ff8d00;
+}
+
 #history {
     margin-top: 18px;
     font-family: 'Lucida Console', monospace;

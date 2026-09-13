@@ -165,10 +165,12 @@ def test_sse_frame_es_data_json_utf8():
 def ui_server(monkeypatch):
     started = {}
 
-    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian", seats=None):
+    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian",
+                   seats=None, production=False):
         if not title:
             raise ValueError("falta el título")
-        started.update({"title": title, "artifact": artifact, "protocol": protocol})
+        started.update({"title": title, "artifact": artifact, "protocol": protocol,
+                        "production": production})
         return {"decision_id": 99, "thread": "d99", "seats": ["melchior"], "degraded": []}
 
     monkeypatch.setattr(magi_ui, "connect", lambda: FakeUiConn())
@@ -330,10 +332,12 @@ def ui_server_conn(monkeypatch, tmp_path):
     estado del tablero (decisiones abiertas/split/cerradas)."""
     started = {}
 
-    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian", seats=None):
+    def fake_start(conn, title, artifact=None, protocol="vote", created_by="adrian",
+                   seats=None, production=False):
         if not title:
             raise ValueError("falta el título")
-        started.update({"title": title, "artifact": artifact, "protocol": protocol})
+        started.update({"title": title, "artifact": artifact, "protocol": protocol,
+                        "production": production})
         return {"decision_id": 99, "thread": "d99", "seats": ["melchior"], "degraded": []}
 
     conn = FakeUiConn()
@@ -387,3 +391,20 @@ def test_council_sin_decision_abierta_abre_una_nueva(ui_server_conn):
     assert body["decision_id"] == 99
     assert started["title"] == "¿y ahora?"
     assert started["protocol"] == "adaptive"
+
+
+def test_council_con_repo_y_flag_abre_decision_production(ui_server_conn):
+    """Modo producción desde la caja única: repo + checkbox llegan a
+    start_decision como artifact + production."""
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(1, status="closed", ruling="yes")]
+    resp = _post(port, "/message", {
+        "mode": "council", "body": "implementar el parser",
+        "artifact": "C:/src/otro-repo", "production": True,
+    })
+    body = json.loads(resp.read())
+    assert resp.status == 201
+    assert body["action"] == "opened"
+    assert body["production"] is True
+    assert started["artifact"] == "C:/src/otro-repo"
+    assert started["production"] is True

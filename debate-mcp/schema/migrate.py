@@ -51,7 +51,7 @@ def discover() -> list[tuple[int, str, Path]]:
 
 def applied(conn) -> set[int]:
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
-    return {r[0] for r in rows}
+    return {r["version"] for r in rows}
 
 
 def main() -> int:

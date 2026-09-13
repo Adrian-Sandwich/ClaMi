@@ -51,8 +51,17 @@ class FakeConn:
             ][:5]
         elif q.startswith("SELECT author, kind, body"):
             rows = []
-        elif q.startswith("SELECT id, title, artifact"):
+        elif q.startswith("SELECT id, title, artifact") and "'open'" in q:
             rows = [d for d in self.decisions if d.get("status") == "open"]
+        elif q.startswith("SELECT id, title, artifact"):
+            # fetch_executing_decisions (modo producción): en los tests, ninguna
+            rows = [d for d in self.decisions if d.get("status") == "executing"]
+        elif q.startswith("SELECT id, title, thread, ruling, confidence"):
+            # _maybe_merge_reviews: en los tests, ninguna revisión cerrada
+            rows = []
+        elif q.startswith("SELECT 1 FROM messages"):
+            # _ejecucion_gestionada / marca de merge: en los tests, nada
+            rows = []
         elif q.startswith("SELECT decision_id, head, round, position"):
             ids = params[0]
             rows = [p for p in self.positions if p["decision_id"] in ids]
@@ -76,6 +85,9 @@ class _Result:
 
     def fetchall(self):
         return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
 
 
 class _Tx:

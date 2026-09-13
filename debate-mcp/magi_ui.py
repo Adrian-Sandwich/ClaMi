@@ -367,9 +367,12 @@ class Handler(BaseHTTPRequestHandler):
                     if d is None:
                         result = board.start_decision(
                             conn, title=body,
+                            artifact=payload.get("artifact"),
                             protocol=payload.get("protocol") or "adaptive",
+                            production=bool(payload.get("production")),
                         )
-                        result = {**result, "kind": "decision", "action": "opened"}
+                        result = {**result, "kind": "decision", "action": "opened",
+                                  "production": bool(payload.get("production"))}
                     else:
                         result = board.human_message(conn, d["thread"], body)
                         if result.get("reopened_decision"):

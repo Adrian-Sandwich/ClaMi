@@ -874,6 +874,20 @@ def process_cycle(conn, state: dict) -> None:
     for d in open_decisions:
         fire_decision_turns(conn, state, d)
 
+    # --- modo producción: ejecutores y merges. Las decisiones 'executing'
+    # no reciben turnos de cabeza; esperan (o corren) al ejecutor.
+    for d in fetch_executing_decisions(conn):
+        token = _token(d["thread"], "executor")
+        with _inflight_lock:
+            busy = token in _inflight
+        if busy or _ejecucion_gestionada(conn, d["thread"]):
+            continue
+        ts = thread_state(state, d["thread"])
+        cwd = resolve_cwd(conn, d["thread"], ts)
+        if cwd and fire_executor_turn(d, cwd):
+            ts["triggers"] += 1
+    _maybe_merge_reviews(conn)
+
     save_state(state)
 
 
@@ -912,6 +926,288 @@ def main() -> None:
                 pass
             time.sleep(backoff)
             backoff = min(backoff * 2, MAX_BACKOFF_SECS)
+
+
+
+
+
+# ---------------------------------------------------------------- modo producción
+# El ciclo deliberar → ejecutar → revisar → mergear. La deliberación es el
+# flujo MAGI de siempre; esto agrega: vigilar las decisiones 'executing',
+# lanzar al ejecutor (asiento CLI con flag executor en heads.json) en la
+# rama magi/d<N>, abrir la revisión del diff como decisión normal, y mergear
+# cuando la revisión cierra unánime.
+
+EJECUTOR_TIMEOUT_SECS = 1800
+
+DIFF_CHARS = 15000
+
+
+def executor_seat(seats: list[dict] | None = None) -> dict | None:
+    """El asiento que ejecuta planes: el marcado executor en heads.json;
+    si no hay, el primer CLI con binario."""
+    registry = seats if seats is not None else heads.load()
+    for s in registry:
+        if s.get("executor") and s.get("bin"):
+            return s
+    for s in registry:
+        if s.get("type", "cli") == "cli" and s.get("bin"):
+            return s
+    return None
+
+
+def _git(cwd: str, args: list[str], timeout: int = 60) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def _prompt_ejecucion(d: dict, base: str, condiciones: list[str]) -> str:
+    rama = decision.rama_ejecucion(d["id"])
+    cond = "; ".join(condiciones) if condiciones else "ninguna explicita"
+    return (
+        f"Sos el EJECUTOR del sistema MAGI. El consejo aprobó un plan y vos lo "
+        f"implementás. Sos un agente autónomo: usá tus herramientas (leer, "
+        f"escribir código, ejecutar tests/comandos) hasta terminar. No pidas "
+        f"confirmación, no te detengas a preguntar.\n\n"
+        f"Plan (decisión #{d['id']}): {d['title']}\n"
+        f"Condiciones impuestas por el consejo: {cond}\n"
+        f"Repositorio de trabajo: {d.get('artifact') or '(tu directorio actual)'}\n\n"
+        f"Instrucciones:\n"
+        f"1. Estás en la rama base '{base}'. Creá y usá la rama '{rama}' "
+        f"(git checkout -b {rama}; si ya existe: git checkout {rama}).\n"
+        f"2. Implementá el plan respetando las condiciones.\n"
+        f"3. Commiteá TODO en '{rama}' con mensajes descriptivos. "
+        f"NO merges, NO push, NO toques otras ramas.\n"
+        f"4. Terminá con un resumen: archivos tocados y decisiones de "
+        f"implementación que tomaste."
+    )
+
+
+def _condiciones_aprobacion(d: dict) -> list[str]:
+    """Las condiciones con que el consejo aprobó el plan (las de las
+    posiciones conditional, del minority report)."""
+    mr = d.get("minority_report") or {}
+    out = []
+    for m in mr.get("minority") or []:
+        for c in m.get("conditions") or []:
+            if c not in out:
+                out.append(c)
+    return out
+
+
+def _run_executor_turn(d: dict, cwd: str) -> None:
+    start = time.monotonic()
+    meta = {"thread": d["thread"], "author": "executor",
+            "token": _token(d["thread"], "executor"),
+            "decision_id": d["id"], "turn": "execute"}
+    try:
+        seat = executor_seat()
+        if seat is None:
+            raise RuntimeError("ningun asiento puede ejecutar (sin binario en el registry)")
+        rama = decision.rama_ejecucion(d["id"])
+        rc, base = _git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
+        if rc != 0:
+            raise RuntimeError(f"el artefacto no es un repo git: {base}")
+        # la rama base queda en el dossier: el merge vuelve ahi
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE decisions
+                SET minority_report = minority_report || jsonb_build_object('base_rama', %s::text)
+                WHERE id = %s
+                """,
+                (base, d["id"]),
+            )
+        prompt = _prompt_ejecucion(d, base, _condiciones_aprobacion(d))
+        ts_label = time.strftime("%Y%m%dT%H%M%S")
+        out_path = LOG_DIR / f"execute_{d['thread']}_{ts_label}.log"
+        log.info("ejecutando plan de %s en %s (%s) -> %s",
+                 d["thread"], cwd, seat["seat"], out_path.name)
+        event("trigger_spawned", pid=None, thread=d["thread"], author=seat["seat"],
+              decision_id=d["id"], round=d.get("round"), turn="execute")
+        timed_out = False
+        with out_path.open("w", encoding="utf-8") as f:
+            proc = subprocess.Popen(
+                [seat["bin"], *seat.get("args", []), prompt],
+                cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
+                **({"start_new_session": True} if os.name == "posix" else {}),
+            )
+            try:
+                rc = proc.wait(timeout=seat.get("exec_timeout_secs", EJECUTOR_TIMEOUT_SECS))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_tree(proc)
+                rc = proc.wait()
+        if timed_out or rc != 0:
+            detalle = "colgado y matado" if timed_out else f"rc={rc}"
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO messages (thread, author, kind, body, artifact)
+                    VALUES (%s, 'magi', 'consulta', %s, NULL)
+                    """,
+                    (d["thread"],
+                     f"EJECUCIÓN FALLIDA — el ejecutor ({seat['seat']}) salió {detalle}. "
+                     f"Log: {out_path.name}. Escribí 'seguí' para reintentar o tu ruling."),
+                )
+            event("trigger_done", rc=rc, timed_out=timed_out,
+                  duration_s=round(time.monotonic() - start, 1), **meta)
+            return
+        # exito: diff de la rama y decision de revision con el diff en el journal
+        _, diff = _git(cwd, ["diff", f"{base}...{rama}", "--"], timeout=120)
+        if not diff:
+            diff = "(sin cambios: la rama no difiere de la base)"
+        diff = diff[:DIFF_CHARS]
+        with connect() as conn:
+            with conn.transaction():
+                rev = board.start_decision(
+                    conn,
+                    title=f"Revisar implementación de #{d['id']}: {d['title']}",
+                    artifact=d.get("artifact"),
+                    protocol="vote",
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages (thread, author, kind, body, artifact)
+                    VALUES (%s, 'magi', 'analisis', %s, %s)
+                    """,
+                    (rev["thread"],
+                     f"Diff de la rama {rama} contra {base} (acotado a "
+                     f"{DIFF_CHARS} chars). Revisá si el plan quedó bien "
+                     f"implementado; los asientos CLI pueden inspeccionar el "
+                     f"repo directamente.\n\n{diff}",
+                     d.get("artifact")),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages (thread, author, kind, body, artifact)
+                    VALUES (%s, 'magi', 'resultado', %s, NULL)
+                    """,
+                    (d["thread"],
+                     f"Ejecución terminada ({seat['seat']}, "
+                     f"{round(time.monotonic() - start)}s) — revisión "
+                     f"#{rev['decision_id']} abierta con el diff."),
+                )
+        log.info("plan de %s ejecutado; revision %s abierta", d["thread"], rev["decision_id"])
+        event("trigger_done", rc=0, timed_out=False,
+              duration_s=round(time.monotonic() - start, 1), **meta)
+    except Exception as exc:
+        log.error("ejecución de %s falló: %s", d["thread"], exc)
+        event("trigger_done", rc=1, error=str(exc),
+              duration_s=round(time.monotonic() - start, 1), **meta)
+
+
+def _run_executor_turn_bg(d: dict, cwd: str) -> None:
+    try:
+        _run_executor_turn(d, cwd)
+    finally:
+        with _inflight_lock:
+            _inflight.discard(_token(d["thread"], "executor"))
+
+
+def fire_executor_turn(d: dict, cwd: str) -> bool:
+    with _inflight_lock:
+        _inflight.add(_token(d["thread"], "executor"))
+    log.info("lanzando ejecutor para decisión %s (%s)", d["id"], d["thread"])
+    threading.Thread(target=_run_executor_turn_bg, args=(d, cwd), daemon=True).start()
+    return True
+
+
+def fetch_executing_decisions(conn) -> list[dict]:
+    """Decisiones production aprobadas esperando (o corriendo) ejecución."""
+    return conn.execute(
+        """
+        SELECT id, title, artifact, protocol, status, round, thread, heads,
+               anchor_id, minority_report
+        FROM decisions
+        WHERE status = 'executing'
+        ORDER BY id
+        """
+    ).fetchall()
+
+
+def _ejecucion_gestionada(conn, thread: str) -> bool:
+    """Ya terminó o falló la ejecución de este thread? (message resultado)."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM messages
+        WHERE thread = %s AND kind = 'resultado'
+          AND (body LIKE 'Ejecución terminada%%' OR body LIKE 'EJECUCIÓN FALLIDA%%')
+        LIMIT 1
+        """,
+        (thread,),
+    ).fetchone()
+    return row is not None
+
+
+def _maybe_merge_reviews(conn) -> None:
+    """Auto-merge: una revisión cerrada unánime (confidence 1.0) se mergea
+    sola en la rama base; mayoría 2/3 deja la instrucción para el operador.
+    Idempotente: el message con 'MERGE' marca la revisión como procesada."""
+    rows = conn.execute(
+        """
+        SELECT id, title, thread, ruling, confidence
+        FROM decisions
+        WHERE status = 'closed' AND ruling = 'yes'
+          AND title LIKE 'Revisar implementación de #%%'
+        ORDER BY id
+        """
+    ).fetchall()
+    for rev in rows:
+        hecha = conn.execute(
+            """
+            SELECT 1 FROM messages
+            WHERE thread = %s AND kind = 'resultado' AND body LIKE 'MERGE%%'
+            LIMIT 1
+            """,
+            (rev["thread"],),
+        ).fetchone()
+        if hecha:
+            continue
+        orig_id = decision.revision_de(rev["title"])
+        if orig_id is None:
+            continue
+        orig = conn.execute(
+            "SELECT artifact, minority_report FROM decisions WHERE id = %s", (orig_id,)
+        ).fetchone()
+        rama = decision.rama_ejecucion(orig_id)
+        if not orig or not orig.get("artifact"):
+            continue
+        repo, mr = orig["artifact"], orig["minority_report"] or {}
+        base = mr.get("base_rama") or "main"
+        if rev["confidence"] == decision.CONFIDENCE_UNANIMOUS:
+            rc, out = _git(repo, ["checkout", base])
+            if rc == 0:
+                rc, out = _git(repo, [
+                    "merge", "--no-ff", rama,
+                    "-m", f"MAGI: plan #{orig_id} aprobado y revisión unánime #{rev['id']}",
+                ])
+            cuerpo = (f"MERGE OK — {rama} mergeada en {base}."
+                      if rc == 0 else
+                      f"MERGE FALLÓ (rc={rc}): {out[-500:]}. Merge manual: "
+                      f"git checkout {base} && git merge --no-ff {rama}")
+            if rc == 0:
+                # el ciclo de la decisión original termina con el merge de
+                # su revisión: queda cerrada (la revisión ya está closed)
+                conn.execute(
+                    "UPDATE decisions SET status = 'closed', closed_at = now() WHERE id = %s",
+                    (orig_id,),
+                )
+        else:
+            cuerpo = (f"MERGE PENDIENTE — aprobada 2/3 (confidence "
+                      f"{rev['confidence']}), no unánime: lo mergea el "
+                      f"operador. git checkout {base} && git merge --no-ff {rama}")
+        conn.execute(
+            """
+            INSERT INTO messages (thread, author, kind, body, artifact)
+            VALUES (%s, 'magi', 'resultado', %s, NULL)
+            """,
+            (rev["thread"], cuerpo),
+        )
+        log.info("revisión %s: %s", rev["id"], cuerpo[:80])
 
 
 if __name__ == "__main__":
