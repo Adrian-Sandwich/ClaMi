@@ -132,6 +132,12 @@ def record_position(
     act = decision.advance(d, positions)
     if act["action"] == "close":
         act["mind_changes"] = decision.mind_changes(positions)
+        approved_conditions = list(dict.fromkeys(
+            c for p in positions
+            if p["round"] == d["round"] and p["head"] in d["heads"]
+            and p["position"] == "conditional"
+            for c in (p.get("conditions") or [])
+        ))
         if decision.debe_ejecutar(d, act):
             # modo producción: no es un cierre, es el pase a ejecución. El
             # relay detecta 'executing', lanza al ejecutor en la rama
@@ -146,6 +152,7 @@ def record_position(
                 (act["ruling"], act["confidence"],
                  Json({
                      "minority": act["minority"],
+                     "approved_conditions": approved_conditions,
                      "degraded": act.get("degraded", False),
                      "mind_changes": act["mind_changes"],
                  }),
@@ -162,6 +169,7 @@ def record_position(
                 (act["ruling"], act["confidence"],
                  Json({
                      "minority": act["minority"],
+                     "approved_conditions": approved_conditions,
                      "degraded": act.get("degraded", False),
                      "mind_changes": act["mind_changes"],
                  }),
@@ -230,7 +238,7 @@ def consulta_destrabe_texto(round_: int, posiciones: list[dict]) -> str:
     )
 
 
-def human_message(conn, thread: str, body: str) -> dict:
+def human_message(conn, thread: str, body: str, action: str | None = None) -> dict:
     """Mensaje del operador humano desde la UI: un solo campo de texto, y el
     kind lo decide el estado del thread — cero protocolo que memorizar.
 
@@ -243,23 +251,26 @@ def human_message(conn, thread: str, body: str) -> dict:
       primera cabeza (los mensajes de adrian con otros kinds no disparan).
     """
     d = conn.execute(
-        "SELECT id, status, round FROM decisions WHERE thread = %s", (thread,)
+        "SELECT id, status, round FROM decisions WHERE thread = %s FOR UPDATE", (thread,)
     ).fetchone()
-    if d is not None and d["status"] == "split" and not _RE_SEGUI.match(body):
+    if action is not None and (action not in ("resume", "arbitrate") or d is None or d["status"] != "split"):
+        raise ValueError("This response action requires a decision awaiting your input")
+    resume = action == "resume" if action is not None else bool(_RE_SEGUI.match(body))
+    if d is not None and d["status"] == "split" and not resume:
         kind = "arbitraje"
     elif d is not None and d["status"] == "split":
         kind = "contexto"
     elif d is not None and d["status"] == "executing":
-        # reintento de ejecución: "seguí" borra la marca de fallo y el
-        # relay vuelve a lanzar al ejecutor en su próximo ciclo.
+        # Sólo un reintento explícito habilita otra ejecución. Se conserva
+        # el journal completo del fallo para auditoría.
         kind = "contexto"
-        conn.execute(
-            """
-            DELETE FROM messages
-            WHERE thread = %s AND kind = 'resultado' AND body LIKE 'EJECUCIÓN FALLIDA%%'
-            """,
-            (thread,),
-        )
+        if _RE_SEGUI.match(body):
+            conn.execute(
+                """UPDATE decisions SET minority_report =
+                   COALESCE(minority_report, '{}'::jsonb) ||
+                   '{"execution_state": "pending"}'::jsonb
+                   WHERE id = %s""", (d["id"],),
+            )
     elif d is not None:
         kind = "contexto"
     else:

@@ -25,6 +25,12 @@ const POSITION_COLORS = {
 let state = null;
 let focusedId = null;
 let uiMode = "council";   // council | chat
+let newDraft = false;
+let sending = false;
+let connected = false;
+let replyAction = "resume";
+let magiSignature = "";
+let conversationSignature = "";
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -37,11 +43,13 @@ function focusPool() {
 }
 
 function focused() {
+  if (newDraft) return null;
   const pool = focusPool();
   if (!pool.length) return null;
-  if (!focusedId || !pool.find(d => d.id === focusedId)) {
+  if (focusedId && !pool.find(d => d.id === focusedId)) return null;
+  if (!focusedId) {
     // default: la más reciente abierta; si no, la última actividad
-    const open = pool.filter(d => d.status === "open" || d.status === "split");
+    const open = pool.filter(d => ["open", "split", "executing"].includes(d.status)).sort((a, b) => b.id - a.id);
     focusedId = (open[0] ?? pool[0]).id;
   }
   return pool.find(d => d.id === focusedId);
@@ -55,6 +63,9 @@ function thinkingSeats(d) {
 // ------------------------------------------------------------- magi
 
 function renderMagi(d) {
+  const signature = JSON.stringify(d ? [d.id, d.round, d.status, d.badge, d.seats] : null);
+  if (signature === magiSignature) return;
+  magiSignature = signature;
   const magi = document.getElementById("magi");
   magi.querySelectorAll(".wise-man, .response, .system-status, .title").forEach(e => e.remove());
 
@@ -71,15 +82,16 @@ function renderMagi(d) {
   status.innerHTML = `<div>${esc(ext)}</div>`;
   magi.appendChild(status);
 
-  (d?.seats ?? []).slice(0, 3).forEach((seat, i) => {
+  (d?.seats ?? SLOTS.map(seat => ({seat, voted:false}))).slice(0, 3).forEach((seat, i) => {
     const slot = SLOTS[i];
     const isThinking = thinking.includes(seat.seat);
     const color = seat.voted ? POSITION_COLORS[seat.position] : POSITION_COLORS.pending;
     const outer = document.createElement("div");
     outer.className = `wise-man ${slot}`;
     const inner = document.createElement("div");
-    inner.className = "inner" + (seat.voted ? "" : " flicker");
+    inner.className = "inner" + (isThinking ? " flicker" : "");
     inner.style.background = color;
+    if (seat.voted && ["yes", "conditional", "info"].includes(seat.position)) inner.style.color = "#080604";
     inner.textContent = `${seat.seat.toUpperCase()} • ${i + 1}`;
     outer.appendChild(inner);
     if (isThinking) {
@@ -89,6 +101,12 @@ function renderMagi(d) {
       outer.appendChild(tag);
     }
     outer.addEventListener("click", () => openModal(seat));
+    outer.tabIndex = 0;
+    outer.setAttribute("role", "button");
+    outer.setAttribute("aria-label", `${seat.seat}: ${seat.voted ? seat.position : 'no vote yet'}. Read reasoning`);
+    outer.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openModal(seat); }
+    });
     magi.appendChild(outer);
   });
 
@@ -126,11 +144,14 @@ function renderConversation(d) {
   } else if (d) {
     msgs = d.journal ?? [];
     input.placeholder = d.status === "split"
-      ? "your ruling closes it, or write 'seguí' (+ context) for another round"
+      ? (replyAction === "resume" ? "Add the context the council needs for another round" : "Write your final ruling and explain why")
       : "Ask the council anything… Enter to send, Shift+Enter for a new line";
   } else {
     input.placeholder = "Ask the council anything… Enter to send, Shift+Enter for a new line";
   }
+  const signature = JSON.stringify([uiMode, d?.id, msgs, thinkingSeats(d)]);
+  if (signature === conversationSignature) return;
+  conversationSignature = signature;
   if (!msgs.length) {
     el.innerHTML = uiMode === "chat"
       ? '<div class="welcome">Talk to the three heads — each answers from its own angle:<br>' +
@@ -163,15 +184,18 @@ function renderConversation(d) {
 
 function renderHistory() {
   const el = document.getElementById("history");
-  const list = (state?.decisions ?? []).filter(d => d.id !== focusedId);
+  const list = state?.decisions ?? [];
   if (!list.length) { el.innerHTML = ""; return; }
   el.innerHTML = '<span class="h-label">HISTORY&nbsp;</span>' + list.map(d =>
-    `<a href="#" data-id="${d.id}" style="color:${d.badge.color}">#${d.id} ${esc(d.badge.text)}` +
-    ` <span class="h-title">— ${esc(d.title.slice(0, 32))}${d.title.length > 32 ? "…" : ""}</span></a>`
+    `<a href="#" data-id="${d.id}" aria-current="${!newDraft && d.id === focusedId ? 'true' : 'false'}" style="color:${d.badge.color}">#${d.id} ${esc(d.badge.text)}` +
+    ` <span class="h-title">— ${esc(d.title)}</span></a>`
   ).join(" &middot; ");
   el.querySelectorAll("a").forEach(a => a.addEventListener("click", ev => {
     ev.preventDefault();
+    if (sending) return;
     focusedId = Number(a.dataset.id);
+    newDraft = false;
+    replyAction = "resume";
     uiMode = "council";
     syncModes();
     render();
@@ -199,7 +223,13 @@ function renderIntent(d) {
       ? `↳ #${d.id} no es un desacuerdo: el consejo te pidió información. Escribí "seguí" + el contexto que falta, o tu ruling para cerrar igual.`
       : `↳ Enter closes #${d.id} with YOUR ruling — o escribí "seguí" para otra ronda.`;
   } else if (d.status === "executing") {
-    txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
+    if (d.execution_state === "failed" || d.execution_state === "merge_blocked") {
+      txt = `↳ #${d.id} needs attention — read the result below. "seguí" retries execution and opens a new review; ABORT closes it.`;
+    } else if (d.execution_state === "reviewing") {
+      txt = `↳ #${d.id} is waiting for its implementation review. Select the review to give the council context.`;
+    } else {
+      txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
+    }
   } else {
     txt = "↳ Enter opens a NEW decision — this one is already closed (see HISTORY below).";
   }
@@ -217,8 +247,11 @@ function renderIntent(d) {
       ? "the council lacks information — they asked you:"
       : "the council disagrees — it's your call:";
     document.getElementById("sa-segui").textContent = faltaInfo
-      ? "seguí — answer with context"
-      : "seguí";
+      ? "Provide missing context"
+      : "Continue with context";
+    el.textContent = replyAction === "resume"
+      ? `Your message starts another voting round for #${d.id}. Add the information the council needs.`
+      : `Your message becomes the final ruling for #${d.id} and closes this decision.`;
   }
 }
 
@@ -229,36 +262,48 @@ function render() {
   renderConversation(d);
   renderHistory();
   renderIntent(d);
+  const active = d && ["open", "split", "executing"].includes(d.status);
+  const newQuestion = uiMode === "council" && !active;
+  document.querySelector(".composer-opts").hidden = !newQuestion;
+  document.getElementById("repo-help").hidden = !newQuestion;
+  if (!newQuestion) document.getElementById("fs-panel").hidden = true;
+  const repo = document.getElementById("c-repo").value.trim();
+  const sendButton = document.getElementById("c-send");
+  sendButton.textContent = sending ? "Sending…" : uiMode === "chat" ? "Send message"
+    : newQuestion ? (repo ? "Start production" : "Ask council")
+    : d.status === "split" ? (replyAction === "resume" ? "Continue discussion" : "Close with my ruling") : "Add context";
+  document.getElementById("sa-segui").setAttribute("aria-pressed", String(replyAction === "resume"));
+  document.getElementById("sa-ruling").setAttribute("aria-pressed", String(replyAction === "arbitrate"));
+  sendButton.disabled = sending || !connected || !document.getElementById("c-input").value.trim();
+  document.querySelectorAll("#modes button, .decision-actions button, #stalemate-actions button").forEach(button => { button.disabled = sending; });
   const abortBtn = document.getElementById("c-abort");
   abortBtn.hidden = !(uiMode === "council" && d && ["open", "split", "executing"].includes(d.status));
   // NEW abre decisión nueva salteando la heurística; en CHAT no aplica
   document.getElementById("c-new").hidden = uiMode !== "council";
 }
 
-// --- NEW: abrir una decisión NUEVA con lo que hay en la caja, aunque haya
-// otra abierta (sin esto, el council siempre mandaba el mensaje a la abierta)
+// Prepare a separate inquiry without sending or discarding the current text.
 document.getElementById("c-new").addEventListener("click", async () => {
   const input = document.getElementById("c-input");
   const status = document.getElementById("c-status");
-  if (!input.value.trim()) {
-    status.textContent = "write the new question first — NEW sends what's in the box as a fresh decision";
-    input.focus();
-    return;
-  }
-  await send(true);
+  newDraft = true;
+  status.textContent = "New question — write your request, then send it to the council.";
+  render();
+  input.focus();
 });
 
-// --- acciones de STALEMATE: botones en vez de recordar la convención.
-// "seguí" prefija la caja (podés agregar contexto o mandarlo solo con Enter):
-// enseña la convención en vez de ejecutarla a escondidas.
+// Explicit response choices preserve the text and determine the server action.
 document.getElementById("sa-segui").addEventListener("click", () => {
   const input = document.getElementById("c-input");
-  input.value = "seguí ";
-  input.placeholder = "add the context the council asked for — or send bare 'seguí' for another round";
+  replyAction = "resume";
+  render();
+  input.placeholder = "Add context for the next voting round";
   input.focus();
 });
 document.getElementById("sa-ruling").addEventListener("click", () => {
   const input = document.getElementById("c-input");
+  replyAction = "arbitrate";
+  render();
   input.placeholder = "your ruling and why — Enter closes the decision";
   input.focus();
 });
@@ -343,36 +388,49 @@ function openModal(seat) {
   document.getElementById("modal-content").innerHTML =
     `<div>position:</div><div>${seat.voted ? esc(seat.position) : "no vote yet this round"}${cond}</div>` +
     `<div>reasoning:</div><div style="white-space:pre-wrap">${esc(seat.body || "(still processing — this can take minutes on local models)")}</div>`;
-  document.getElementById("modal").hidden = false;
+  document.getElementById("modal").showModal();
 }
 
 document.getElementById("modal-close").addEventListener("click", () => {
-  document.getElementById("modal").hidden = true;
+  document.getElementById("modal").close();
 });
 
 // ------------------------------------------------------------- composer
 
 function syncModes() {
-  document.querySelectorAll("#modes button").forEach(b =>
+  document.querySelectorAll("#modes button[data-mode]").forEach(b =>
     b.classList.toggle("active", b.dataset.mode === uiMode));
 }
 
-document.querySelectorAll("#modes button").forEach(b =>
+document.querySelectorAll("#modes button[data-mode]").forEach(b =>
   b.addEventListener("click", () => { uiMode = b.dataset.mode; syncModes(); render(); }));
 
 async function send(forceNew = false) {
   const status = document.getElementById("c-status");
   const input = document.getElementById("c-input");
   const body = input.value.trim();
-  if (!body) return;
+  if (!body || sending || !connected) return;
+  const originalValue = input.value;
   const payload = { mode: uiMode, body };
+  const target = focused();
+  if (uiMode === "council" && !forceNew) {
+    if (target && ["open", "split", "executing"].includes(target.status)) {
+      payload.decision_id = target.id;
+      if (target.status === "split") payload.action = replyAction;
+    } else {
+      payload.force_new = true;
+    }
+  }
   // con repo, production es siempre: lo aprobado se ejecuta ahí
   const repo = document.getElementById("c-repo").value.trim();
-  if (uiMode === "council" && repo) {
+  if (uiMode === "council" && repo && (payload.force_new || forceNew)) {
     payload.artifact = repo;
     payload.production = true;
   }
   if (forceNew) payload.force_new = true;
+  sending = true;
+  render();
+  MagiSound.unlock();
   status.textContent = "sending…";
   try {
     const resp = await fetch("/message", {
@@ -384,6 +442,7 @@ async function send(forceNew = false) {
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     if (data.action === "opened") {
       focusedId = data.decision_id;
+      newDraft = false;
       status.textContent = data.production
         ? `production decision #${data.decision_id} opened — approve the plan and an executor implements it`
         : `decision #${data.decision_id} opened — the council is deliberating`;
@@ -391,7 +450,7 @@ async function send(forceNew = false) {
       status.textContent = `decision #${data.decision_id} reopened — the heads recast with your context`;
     } else if (data.action === "hint") {
       status.textContent = data.message;
-      input.value = "";
+      if (input.value === originalValue) input.value = "";
       return;
     } else if (data.action === "arbitrated") {
       status.textContent = `decision #${data.decision_id} closed with your ruling`;
@@ -400,18 +459,60 @@ async function send(forceNew = false) {
     } else {
       status.textContent = "sent — the council answers in turn";
     }
-    input.value = "";
+    if (input.value === originalValue) input.value = "";
+    MagiSound.play("send");
   } catch (err) {
     status.textContent = `error: ${err.message}`;
+  } finally {
+    sending = false;
+    render();
   }
 }
 
 document.getElementById("c-input").addEventListener("keydown", ev => {
-  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(); }
+  if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); }
 });
 
 // ------------------------------------------------------------- events
 
 const events = new EventSource("/events");
-events.onmessage = e => { state = JSON.parse(e.data); render(); };
-events.onerror = () => { /* EventSource reintenta solo */ };
+let soundBaseline = false;
+events.onmessage = e => {
+  const next = JSON.parse(e.data);
+  const previous = focused();
+  const current = next.decisions.find(d => d.id === previous?.id);
+  if (soundBaseline && previous && current) {
+    if (current.status !== previous.status || current.execution_state !== previous.execution_state) {
+      MagiSound.play(current.status === "split" || ["failed", "merge_blocked"].includes(current.execution_state) ? "attention" : "result");
+    } else if (current.round === previous.round && current.seats.some(s => s.voted && !previous.seats.find(p => p.seat === s.seat)?.voted)) {
+      MagiSound.play("vote");
+    }
+  }
+  state = next; soundBaseline = true; connected = true;
+  document.getElementById("connection-status").textContent = "● Live";
+  render();
+};
+events.onerror = () => {
+  connected = false; soundBaseline = false;
+  document.getElementById("connection-status").textContent = "Reconnecting — sending paused";
+  render();
+};
+document.getElementById("c-send").addEventListener("click", () => send());
+document.getElementById("c-input").addEventListener("input", render);
+const soundToggle = document.getElementById("sound-toggle");
+function syncSound() {
+  soundToggle.textContent = `Sound: ${MagiSound.enabled ? "ON" : "OFF"}`;
+  soundToggle.setAttribute("aria-pressed", String(MagiSound.enabled));
+  document.getElementById("sound-volume").value = MagiSound.volume * 100;
+}
+soundToggle.addEventListener("click", async () => {
+  MagiSound.setEnabled(!MagiSound.enabled); syncSound();
+  await MagiSound.unlock(); MagiSound.play("send");
+});
+document.getElementById("sound-volume").addEventListener("input", event => MagiSound.setVolume(Number(event.target.value) / 100));
+document.addEventListener("pointerdown", () => MagiSound.unlock());
+document.addEventListener("keydown", () => MagiSound.unlock());
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") document.getElementById("modal-close").click();
+});
+syncSound(); syncModes(); render();

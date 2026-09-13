@@ -56,10 +56,10 @@ class FakeConn:
         elif q.startswith("SELECT id, title, artifact"):
             # fetch_executing_decisions (modo producción): en los tests, ninguna
             rows = [d for d in self.decisions if d.get("status") == "executing"]
-        elif q.startswith("SELECT id, title, thread, ruling, confidence"):
+        elif q.startswith("SELECT d.id, d.minority_report"):
             # _maybe_merge_reviews: en los tests, ninguna revisión cerrada
             rows = []
-        elif q.startswith("SELECT 1 FROM messages"):
+        elif q.startswith("SELECT 1 FROM messages") or q.startswith("SELECT 1 FROM decisions d"):
             # _ejecucion_gestionada / marca de merge: en los tests, nada
             rows = []
         elif q.startswith("SELECT decision_id, head, round, position"):
@@ -152,6 +152,28 @@ def fired_magi(monkeypatch, tmp_path):
 
 def fresh_state():
     return {"last_id": 0, "threads": {}, "pending": []}
+
+
+def test_executor_respects_global_concurrency_limit(fired_magi, monkeypatch):
+    d = {"id": 1, "thread": "d1", "status": "executing"}
+    conn = FakeConn([], decisions=[d])
+    calls = []
+    monkeypatch.setattr(relay, "_inflight", {f"chat{i}" for i in range(relay.MAX_CONCURRENT_TRIGGERS)})
+    monkeypatch.setattr(relay, "fire_executor_turn", lambda *a: calls.append(a))
+    relay.process_cycle(conn, fresh_state())
+    assert calls == []
+
+
+def test_failed_execution_is_not_relaunched_each_cycle(fired_magi, monkeypatch):
+    d = {"id": 1, "thread": "d1", "status": "executing"}
+    conn = FakeConn([], decisions=[d])
+    calls = []
+    monkeypatch.setattr(relay, "_ejecucion_gestionada", lambda *a: True)
+    monkeypatch.setattr(relay, "fire_executor_turn", lambda *a: calls.append(a))
+    state = fresh_state()
+    relay.process_cycle(conn, state)
+    relay.process_cycle(conn, state)
+    assert calls == []
 
 
 # ------------------------------------------------- cierre de thread (libre)

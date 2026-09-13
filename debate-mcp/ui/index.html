@@ -2,11 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MAGI — ClaMi</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <div class="system">
+    <header class="console-toolbar"><strong>MAGI / COUNCIL CONTROL</strong><span id="connection-status" role="status">Connecting…</span><button id="sound-toggle" aria-pressed="false">Sound: OFF</button><label class="volume-control">Volume <input id="sound-volume" aria-label="Sound volume" type="range" min="0" max="100" value="25"></label></header>
     <div class="magi" id="magi">
       <div class="header left"><hr><hr><span>INQUIRY</span><hr><hr></div>
       <div class="header right"><hr><hr><span>RESOLUTION</span><hr><hr></div>
@@ -24,21 +26,23 @@
       <div class="modes" id="modes">
         <button data-mode="council" class="active">COUNCIL</button>
         <button data-mode="chat">CHAT</button>
-        <button id="c-new" title="open a NEW decision with what's in the box (skips any open one)">NEW</button>
-        <button id="c-abort" hidden>ABORT</button>
       </div>
+      <div class="decision-actions"><button id="c-new">＋ New question</button><button id="c-abort" hidden>Abort decision</button></div>
+      <label class="input-label" for="c-input">Your message</label>
       <div class="intent" id="c-intent"></div>
       <div class="stalemate-actions" id="stalemate-actions" hidden>
         <span>the council disagrees — it's your call:</span>
         <button id="sa-ruling">close with my ruling</button>
-        <button id="sa-segui">seguí</button>
+        <button id="sa-segui">Continue with context</button>
       </div>
       <textarea id="c-input" rows="3"
         placeholder="Ask the council anything… Enter to send, Shift+Enter for a new line"></textarea>
       <div class="composer-opts">
+        <label for="c-repo">Repository</label>
         <input id="c-repo" placeholder="repo folder (optional — pick or type)">
         <button id="c-browse" title="browse folders">📂</button>
       </div>
+      <p id="repo-help">Optional: an approved plan will be implemented, reviewed and merged in this repository.</p>
       <div class="fs-panel" id="fs-panel" hidden>
         <div class="fs-bar">
           <button id="fs-up" hidden>⬆ up</button>
@@ -47,19 +51,21 @@
         </div>
         <div class="fs-list" id="fs-list"></div>
       </div>
-      <div class="composer-hint" id="c-status"></div>
+      <div class="send-row"><span>Enter to send · Shift+Enter for a new line</span><button id="c-send" disabled>Ask council</button></div>
+      <div class="composer-hint" id="c-status" role="status" aria-live="polite"></div>
     </div>
 
     <div id="history"></div>
 
-    <div class="modal" id="modal" hidden>
+    <dialog class="modal" id="modal" aria-labelledby="modal-title">
       <div class="modal-header">
         <div class="modal-title" id="modal-title"></div>
-        <div class="close" id="modal-close">X</div>
+        <button class="close" id="modal-close" aria-label="Close reasoning">X</button>
       </div>
       <div class="modal-body"><div id="modal-content"></div></div>
-    </div>
+    </dialog>
   </div>
+  <script src="/sound.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

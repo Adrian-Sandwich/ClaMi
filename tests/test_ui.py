@@ -53,11 +53,11 @@ class FakeUiConn:
 
     def execute(self, query, params=()):
         q = " ".join(query.split())
-        if "FROM decisions WHERE status = 'open'" in q:
-            rows = [d for d in self.decisions if d["status"] == "open"]
-        elif "FROM decisions WHERE status <> 'open'" in q:
+        if "FROM decisions WHERE status IN ('open', 'split', 'executing')" in q:
+            rows = [d for d in self.decisions if d["status"] in ("open", "split", "executing")]
+        elif "FROM decisions WHERE status = 'closed'" in q:
             limit = params[0] if params else len(self.decisions)
-            rows = [d for d in self.decisions if d["status"] != "open"][:limit]
+            rows = [d for d in self.decisions if d["status"] == "closed"][:limit]
         elif q.startswith("SELECT p.decision_id"):
             rows = [p for p in self.positions if p["decision_id"] in params[0]]
         elif q.startswith("SELECT thread, author, kind, body, created_at"):
@@ -67,6 +67,8 @@ class FakeUiConn:
             rows = [m for m in self.messages
                     if m["thread"] in threads and m["kind"] in kinds][::-1]
         elif q.startswith("SELECT id, thread, status FROM decisions"):
+            if "WHERE id = %s" in q:
+                return _R([d for d in self.decisions if d["id"] == params[0]])
             # la consulta del modo council trae los estados inline en el SQL
             import re as _re
             statuses = _re.findall(r"'(\w+)'", q.split("IN", 1)[1])
@@ -114,6 +116,26 @@ class _R:
 def test_badge_abierto_es_deliberating_paradeando():
     b = magi_ui.verdict_badge({"status": "open", "ruling": None})
     assert b["text"] == "DELIBERATING" and b["flicker"] is True
+
+
+@pytest.mark.parametrize("stage,label", [
+    ("pending", "EXECUTING"), ("failed", "EXECUTION FAILED"),
+    ("reviewing", "IN REVIEW"), ("merge_blocked", "MERGE PENDING"),
+])
+def test_badge_describes_execution_stage(stage, label):
+    b = magi_ui.verdict_badge(_decision(1, status="executing", ruling="yes",
+                            minority_report={"execution_state": stage}))
+    assert b["text"] == label
+    if stage in ("failed", "merge_blocked"):
+        assert not b["flicker"]
+
+
+def test_active_production_is_visible_beyond_closed_history_limit():
+    conn = FakeUiConn()
+    conn.decisions = [_decision(i, status="closed", ruling="yes") for i in range(2, 30)]
+    conn.decisions.append(_decision(1, status="executing", ruling="yes"))
+    snapshot = magi_ui.build_state(conn)
+    assert any(d["id"] == 1 for d in snapshot["decisions"])
 
 
 def test_badge_split_es_stalemate_gris():
@@ -190,7 +212,7 @@ def _get(port, path):
 
 def test_get_index_y_estaticos(ui_server):
     port, _ = ui_server
-    for path, ctype in (("/", "text/html"), ("/style.css", "text/css"), ("/app.js", "text/javascript")):
+    for path, ctype in (("/", "text/html"), ("/style.css", "text/css"), ("/app.js", "text/javascript"), ("/sound.js", "text/javascript")):
         resp = _get(port, path)
         assert resp.status == 200, path
         assert ctype in resp.getheader("Content-Type"), path
@@ -368,6 +390,33 @@ def test_council_con_decision_abierta_manda_contexto(ui_server_conn, monkeypatch
     assert body["action"] == "context"
     assert body["decision_id"] == 2
     assert calls == {"thread": "d2", "body": "mirá también config.py"}
+
+
+@pytest.mark.parametrize("status", ["open", "split", "executing"])
+def test_council_usa_la_decision_seleccionada(ui_server_conn, monkeypatch, status):
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(8), _decision(2, status=status)]
+    calls = []
+    def human(c, thread, body):
+        calls.append(thread)
+        return {"id": 99, "kind": "contexto"}
+    monkeypatch.setattr(magi_ui.board, "human_message", human)
+    response = _post(port, "/message", {
+        "mode": "council", "body": "seguí con los tests", "decision_id": 2,
+    })
+    assert response.status == 201
+    assert json.loads(response.read())["decision_id"] == 2
+    assert calls == ["d2"]
+
+
+def test_council_no_redirige_si_la_seleccionada_cerro(ui_server_conn):
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(8), _decision(2, status="closed", ruling="yes")]
+    response = _post(port, "/message", {
+        "mode": "council", "body": "contexto", "decision_id": 2,
+    })
+    assert response.status == 409
+    assert not started
 
 
 def test_council_con_stalemate_arbitra(ui_server_conn, monkeypatch):

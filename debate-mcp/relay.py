@@ -75,6 +75,8 @@ import memory_ctx  # noqa: E402
 import decision  # noqa: E402
 import heads  # noqa: E402
 import personas  # noqa: E402
+import production  # noqa: E402
+from psycopg.types.json import Json  # noqa: E402
 
 from config import connect  # noqa: E402
 
@@ -532,12 +534,17 @@ def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int,
             proc = subprocess.Popen(
                 [seat_info["bin"], *seat_info.get("args", []), "-"],
                 cwd=cwd, stdin=fin, stdout=fout, stderr=subprocess.STDOUT,
+                **({"start_new_session": True} if os.name == "posix" else {}),
             )
             if token is not None:
                 with _procs_lock:
                     _procs[token] = proc
             try:
                 rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                proc.wait()
+                raise
             finally:
                 if token is not None:
                     with _procs_lock:
@@ -912,6 +919,9 @@ def process_cycle(conn, state: dict) -> None:
         token = _token(d["thread"], "executor")
         with _inflight_lock:
             busy = token in _inflight
+            total = len(_inflight)
+        if total >= MAX_CONCURRENT_TRIGGERS:
+            break
         if busy or _ejecucion_gestionada(conn, d["thread"]):
             continue
         ts = thread_state(state, d["thread"])
@@ -1007,10 +1017,11 @@ def _prompt_ejecucion(d: dict, base: str, condiciones: list[str]) -> str:
         f"confirmación, no te detengas a preguntar.\n\n"
         f"Plan (decisión #{d['id']}): {d['title']}\n"
         f"Condiciones impuestas por el consejo: {cond}\n"
-        f"Repositorio de trabajo: {d.get('artifact') or '(tu directorio actual)'}\n\n"
+        f"Repositorio de trabajo: tu worktree aislado (directorio actual).\n\n"
         f"Instrucciones:\n"
-        f"1. Estás en la rama base '{base}'. Creá y usá la rama '{rama}' "
-        f"(git checkout -b {rama}; si ya existe: git checkout {rama}).\n"
+        f"1. Ya estás en la rama '{rama}', en un worktree creado por MAGI "
+        f"desde '{base}'. No cambies de rama ni de worktree. "
+        f"Si hay cambios de un intento anterior, inspeccionalos y continuá.\n"
         f"2. Implementá el plan respetando las condiciones.\n"
         f"3. Commiteá TODO en '{rama}' con mensajes descriptivos. "
         f"NO merges, NO push, NO toques otras ramas.\n"
@@ -1020,9 +1031,10 @@ def _prompt_ejecucion(d: dict, base: str, condiciones: list[str]) -> str:
 
 
 def _condiciones_aprobacion(d: dict) -> list[str]:
-    """Las condiciones con que el consejo aprobó el plan (las de las
-    posiciones conditional, del minority report)."""
+    """Condiciones de la ronda aprobada; fallback para dossiers antiguos."""
     mr = d.get("minority_report") or {}
+    if "approved_conditions" in mr:
+        return list(mr["approved_conditions"])
     out = []
     for m in mr.get("minority") or []:
         for c in m.get("conditions") or []:
@@ -1031,7 +1043,24 @@ def _condiciones_aprobacion(d: dict) -> list[str]:
     return out
 
 
-def _run_executor_turn(d: dict, cwd: str) -> None:
+def _execution_failed(d: dict, detail: str) -> None:
+    """Persist failure and its explanation together; retries keep the journal."""
+    with connect() as conn:
+        with conn.transaction():
+            conn.execute(
+                """UPDATE decisions SET minority_report =
+                   COALESCE(minority_report, '{}'::jsonb) ||
+                   '{"execution_state": "failed"}'::jsonb
+                   WHERE id = %s AND status = 'executing'""", (d["id"],),
+            )
+            conn.execute(
+                """INSERT INTO messages (thread, author, kind, body, artifact)
+                   VALUES (%s, 'magi', 'consulta', %s, NULL)""",
+                (d["thread"], f"EJECUCIÓN FALLIDA — {detail}. Escribí 'seguí' para reintentar o abortá la decisión."),
+            )
+
+
+def _execute_plan(d: dict, cwd: str) -> None:
     start = time.monotonic()
     meta = {"thread": d["thread"], "author": "executor",
             "token": _token(d["thread"], "executor"),
@@ -1040,20 +1069,20 @@ def _run_executor_turn(d: dict, cwd: str) -> None:
         seat = executor_seat()
         if seat is None:
             raise RuntimeError("ningun asiento puede ejecutar (sin binario en el registry)")
-        rama = decision.rama_ejecucion(d["id"])
-        rc, base = _git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
-        if rc != 0:
-            raise RuntimeError(f"el artefacto no es un repo git: {base}")
-        # la rama base queda en el dossier: el merge vuelve ahi
+        run = production.plan(cwd, d["id"], (d.get("minority_report") or {}).get("execution"))
+        rama, base = run["branch"], run["base_branch"]
+        # Persist the immutable base before creating a worktree so retries
+        # never capture a different user branch as their starting point.
         with connect() as conn:
             conn.execute(
                 """
                 UPDATE decisions
-                SET minority_report = minority_report || jsonb_build_object('base_rama', %s::text)
+                SET minority_report = COALESCE(minority_report, '{}'::jsonb) || %s::jsonb
                 WHERE id = %s
                 """,
-                (base, d["id"]),
+                (Json({"base_rama": base, "execution": run}), d["id"]),
             )
+        cwd = production.prepare(run)
         prompt = _prompt_ejecucion(d, base, _condiciones_aprobacion(d))
         ts_label = time.strftime("%Y%m%dT%H%M%S")
         out_path = LOG_DIR / f"execute_{d['thread']}_{ts_label}.log"
@@ -1081,31 +1110,32 @@ def _run_executor_turn(d: dict, cwd: str) -> None:
                     _procs.pop(meta["token"], None)
         if timed_out or rc != 0:
             detalle = "colgado y matado" if timed_out else f"rc={rc}"
-            with connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO messages (thread, author, kind, body, artifact)
-                    VALUES (%s, 'magi', 'consulta', %s, NULL)
-                    """,
-                    (d["thread"],
-                     f"EJECUCIÓN FALLIDA — el ejecutor ({seat['seat']}) salió {detalle}. "
-                     f"Log: {out_path.name}. Escribí 'seguí' para reintentar o tu ruling."),
-                )
+            _execution_failed(d, f"el ejecutor ({seat['seat']}) salió {detalle}. Log: {out_path.name}")
             event("trigger_done", rc=rc, timed_out=timed_out,
                   duration_s=round(time.monotonic() - start, 1), **meta)
             return
         # exito: diff de la rama y decision de revision con el diff en el journal
-        _, diff = _git(cwd, ["diff", f"{base}...{rama}", "--"], timeout=120)
+        reviewed_sha, diff = production.review_target(run)
         if not diff:
             diff = "(sin cambios: la rama no difiere de la base)"
         diff = diff[:DIFF_CHARS]
         with connect() as conn:
             with conn.transaction():
+                active = conn.execute(
+                    "SELECT status FROM decisions WHERE id = %s FOR UPDATE", (d["id"],)
+                ).fetchone()
+                if not active or active["status"] != "executing":
+                    return  # An abort while the agent exited wins over publication.
                 rev = board.start_decision(
                     conn,
                     title=f"Revisar implementación de #{d['id']}: {d['title']}",
-                    artifact=d.get("artifact"),
+                    artifact=cwd,
                     protocol="vote",
+                )
+                run.update(review_id=rev["decision_id"], reviewed_sha=reviewed_sha)
+                conn.execute(
+                    "UPDATE decisions SET minority_report = minority_report || %s::jsonb WHERE id = %s",
+                    (Json({"execution": run, "execution_state": "reviewing"}), d["id"]),
                 )
                 conn.execute(
                     """
@@ -1113,11 +1143,12 @@ def _run_executor_turn(d: dict, cwd: str) -> None:
                     VALUES (%s, 'magi', 'analisis', %s, %s)
                     """,
                     (rev["thread"],
+                     f"Revisión del commit exacto {reviewed_sha} contra {run['base_sha']}. "
                      f"Diff de la rama {rama} contra {base} (acotado a "
                      f"{DIFF_CHARS} chars). Revisá si el plan quedó bien "
                      f"implementado; los asientos CLI pueden inspeccionar el "
                      f"repo directamente.\n\n{diff}",
-                     d.get("artifact")),
+                     cwd),
                 )
                 conn.execute(
                     """
@@ -1134,8 +1165,33 @@ def _run_executor_turn(d: dict, cwd: str) -> None:
               duration_s=round(time.monotonic() - start, 1), **meta)
     except Exception as exc:
         log.error("ejecución de %s falló: %s", d["thread"], exc)
+        _execution_failed(d, str(exc))
         event("trigger_done", rc=1, error=str(exc),
               duration_s=round(time.monotonic() - start, 1), **meta)
+
+
+def _run_executor_turn(d: dict, cwd: str) -> None:
+    """One executor/merge per Git common directory across relay processes."""
+    try:
+        if executor_seat() is None:
+            raise RuntimeError("ningun asiento puede ejecutar (sin binario en el registry)")
+        key = os.path.normcase(production.common_dir(cwd))
+        with connect() as lease:
+            acquired = lease.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS acquired", (key,)
+            ).fetchone()["acquired"]
+            if not acquired:
+                return
+            try:
+                # Fetch again under the repo lease: an earlier relay may have
+                # finished or the operator may have aborted while we queued.
+                current = lease.execute("SELECT * FROM decisions WHERE id = %s", (d["id"],)).fetchone()
+                if current and current["status"] == "executing" and not _ejecucion_gestionada(lease, current["thread"]):
+                    _execute_plan(current, cwd)
+            finally:
+                lease.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+    except Exception as exc:
+        _execution_failed(d, str(exc))
 
 
 def _run_executor_turn_bg(d: dict, cwd: str) -> None:
@@ -1168,12 +1224,17 @@ def fetch_executing_decisions(conn) -> list[dict]:
 
 
 def _ejecucion_gestionada(conn, thread: str) -> bool:
-    """Ya terminó o falló la ejecución de este thread? (message resultado)."""
+    """Fallo persistido o revisión abierta; reconoce también fallos antiguos."""
     row = conn.execute(
         """
-        SELECT 1 FROM messages
-        WHERE thread = %s AND kind = 'resultado'
-          AND (body LIKE 'Ejecución terminada%%' OR body LIKE 'EJECUCIÓN FALLIDA%%')
+        SELECT 1 FROM decisions d
+        WHERE d.thread = %s AND (
+          d.minority_report->>'execution_state' IN ('failed', 'reviewing', 'merge_blocked')
+          OR (d.minority_report->>'execution_state' IS NULL
+            AND EXISTS (SELECT 1 FROM messages m WHERE m.thread = d.thread
+              AND m.kind IN ('resultado', 'consulta')
+              AND (m.body LIKE 'EJECUCIÓN FALLIDA%%' OR m.body LIKE 'Ejecución terminada%%')))
+        )
         LIMIT 1
         """,
         (thread,),
@@ -1182,70 +1243,68 @@ def _ejecucion_gestionada(conn, thread: str) -> bool:
 
 
 def _maybe_merge_reviews(conn) -> None:
-    """Auto-merge: una revisión cerrada unánime (confidence 1.0) se mergea
-    sola en la rama base; mayoría 2/3 deja la instrucción para el operador.
-    Idempotente: el message con 'MERGE' marca la revisión como procesada."""
+    """Only a persisted execution/review link can authorize a Git merge."""
     rows = conn.execute(
         """
-        SELECT id, title, thread, ruling, confidence
-        FROM decisions
-        WHERE status = 'closed' AND ruling = 'yes'
-          AND title LIKE 'Revisar implementación de #%%'
-        ORDER BY id
+        SELECT d.id, d.minority_report
+        FROM decisions d JOIN decisions r
+          ON r.id::text = d.minority_report->'execution'->>'review_id'
+        WHERE d.status = 'executing' AND r.status = 'closed'
+          AND d.minority_report->>'execution_state' = 'reviewing'
+        ORDER BY d.id
         """
     ).fetchall()
-    for rev in rows:
-        hecha = conn.execute(
-            """
-            SELECT 1 FROM messages
-            WHERE thread = %s AND kind = 'resultado' AND body LIKE 'MERGE%%'
-            LIMIT 1
-            """,
-            (rev["thread"],),
-        ).fetchone()
-        if hecha:
-            continue
-        orig_id = decision.revision_de(rev["title"])
-        if orig_id is None:
-            continue
-        orig = conn.execute(
-            "SELECT artifact, minority_report FROM decisions WHERE id = %s", (orig_id,)
-        ).fetchone()
-        rama = decision.rama_ejecucion(orig_id)
-        if not orig or not orig.get("artifact"):
-            continue
-        repo, mr = orig["artifact"], orig["minority_report"] or {}
-        base = mr.get("base_rama") or "main"
-        if rev["confidence"] == decision.CONFIDENCE_UNANIMOUS:
-            rc, out = _git(repo, ["checkout", base])
-            if rc == 0:
-                rc, out = _git(repo, [
-                    "merge", "--no-ff", rama,
-                    "-m", f"MAGI: plan #{orig_id} aprobado y revisión unánime #{rev['id']}",
-                ])
-            cuerpo = (f"MERGE OK — {rama} mergeada en {base}."
-                      if rc == 0 else
-                      f"MERGE FALLÓ (rc={rc}): {out[-500:]}. Merge manual: "
-                      f"git checkout {base} && git merge --no-ff {rama}")
-            if rc == 0:
-                # el ciclo de la decisión original termina con el merge de
-                # su revisión: queda cerrada (la revisión ya está closed)
-                conn.execute(
-                    "UPDATE decisions SET status = 'closed', closed_at = now() WHERE id = %s",
-                    (orig_id,),
-                )
+    for candidate in rows:
+        try:
+            _merge_candidate(conn, candidate)
+        except Exception:
+            log.exception("no se pudo procesar la revisión de #%s", candidate["id"])
+
+
+def _merge_candidate(conn, candidate: dict) -> None:
+    run = candidate["minority_report"]["execution"]
+    key = os.path.normcase(production.common_dir(run["repo"]))
+    with conn.transaction():
+        locked = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired", (key,)
+        ).fetchone()["acquired"]
+        if not locked:
+            return
+        orig = conn.execute("SELECT * FROM decisions WHERE id = %s FOR UPDATE", (candidate["id"],)).fetchone()
+        if not orig or orig["status"] != "executing":
+            return
+        mr = orig["minority_report"] or {}
+        if mr.get("execution_state") != "reviewing" or mr.get("aborted"):
+            return
+        run = mr["execution"]
+        rev = conn.execute("SELECT * FROM decisions WHERE id = %s FOR UPDATE", (run["review_id"],)).fetchone()
+        if not rev or rev["status"] != "closed":
+            return
+        approved = (rev["ruling"] == "yes"
+                    and rev["confidence"] == decision.CONFIDENCE_UNANIMOUS
+                    and not (rev.get("minority_report") or {}).get("aborted"))
+        state = "merge_blocked"
+        if approved:
+            try:
+                merged = production.merge_reviewed(run, f"MAGI: plan #{orig['id']}, revisión #{rev['id']}")
+                run["merge_sha"] = merged
+                state = "merged"
+                body = f"MERGE OK — commit revisado {run['reviewed_sha']} integrado como {merged}."
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                body = f"MERGE DETENIDO — {exc}. Se conserva el worktree; resolvé el estado del repo o abrí un plan nuevo."
         else:
-            cuerpo = (f"MERGE PENDIENTE — aprobada 2/3 (confidence "
-                      f"{rev['confidence']}), no unánime: lo mergea el "
-                      f"operador. git checkout {base} && git merge --no-ff {rama}")
+            body = f"MERGE PENDIENTE — revisión #{rev['id']} sin aprobación unánime; commit {run['reviewed_sha']} conservado para inspección."
         conn.execute(
-            """
-            INSERT INTO messages (thread, author, kind, body, artifact)
-            VALUES (%s, 'magi', 'resultado', %s, NULL)
-            """,
-            (rev["thread"], cuerpo),
+            """UPDATE decisions SET minority_report = minority_report || %s::jsonb,
+               status = CASE WHEN %s THEN 'closed' ELSE status END,
+               closed_at = CASE WHEN %s THEN now() ELSE closed_at END WHERE id = %s""",
+            (Json({"execution": run, "execution_state": state}), state == "merged", state == "merged", orig["id"]),
         )
-        log.info("revisión %s: %s", rev["id"], cuerpo[:80])
+        for thread in (orig["thread"], rev["thread"]):
+            conn.execute(
+                """INSERT INTO messages (thread, author, kind, body, artifact)
+                   VALUES (%s, 'magi', 'resultado', %s, NULL)""", (thread, body),
+            )
 
 
 

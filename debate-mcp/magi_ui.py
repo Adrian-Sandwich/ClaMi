@@ -93,6 +93,11 @@ def verdict_badge(d: dict) -> dict:
         return {"text": "ABORTED", "color": "gray", "flicker": False}
     if d["status"] == "open":
         return {"text": "DELIBERATING", "color": "#ff8d00", "flicker": True}
+    if d["status"] == "executing":
+        stage = mr.get("execution_state")
+        label = {"failed": "EXECUTION FAILED", "reviewing": "IN REVIEW",
+                 "merge_blocked": "MERGE PENDING"}.get(stage, "EXECUTING")
+        return {"text": label, "color": "#ff8d00", "flicker": stage not in ("failed", "merge_blocked")}
     if d["status"] == "split" or (d["status"] == "closed" and not d["ruling"]):
         # split (o cerrada por arbitraje humano, sin ruling de máquina)
         return {"text": "STALEMATE", "color": "gray", "flicker": False}
@@ -106,13 +111,13 @@ def build_state(conn) -> dict:
     open_rows = conn.execute(
         """
         SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
-        FROM decisions WHERE status = 'open' ORDER BY id
+        FROM decisions WHERE status IN ('open', 'split', 'executing') ORDER BY id
         """
     ).fetchall()
     closed_rows = conn.execute(
         """
         SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
-        FROM decisions WHERE status <> 'open' ORDER BY id DESC LIMIT %s
+        FROM decisions WHERE status = 'closed' ORDER BY id DESC LIMIT %s
         """,
         (CLOSED_DECISIONS,),
     ).fetchall()
@@ -176,6 +181,7 @@ def build_state(conn) -> dict:
             "confidence": r["confidence"], "round": r["round"],
             "thread": r["thread"], "badge": verdict_badge(r),
             "aborted": bool(mr.get("aborted")),
+            "execution_state": mr.get("execution_state"),
             "seats": seats, "journal": journal,
         })
 
@@ -257,6 +263,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file("style.css", "text/css; charset=utf-8")
         elif self.path == "/app.js":
             self._send_file("app.js", "text/javascript; charset=utf-8")
+        elif self.path == "/sound.js":
+            self._send_file("sound.js", "text/javascript; charset=utf-8")
         elif self.path.startswith("/fs"):
             self._fs()
         elif self.path == "/state":
@@ -432,13 +440,24 @@ class Handler(BaseHTTPRequestHandler):
             # (botón NEW) salta la heurística: abre decisión nueva siempre.
             with connect() as conn:
                 with conn.transaction():
-                    d = None if payload.get("force_new") else conn.execute(
-                        """
-                        SELECT id, thread, status FROM decisions
-                        WHERE status IN ('open', 'split')
-                        ORDER BY id DESC LIMIT 1
-                        """
-                    ).fetchone()
+                    target = payload.get("decision_id")
+                    d = None
+                    if not payload.get("force_new") and target is not None:
+                        d = conn.execute(
+                            "SELECT id, thread, status FROM decisions WHERE id = %s FOR UPDATE",
+                            (int(target),),
+                        ).fetchone()
+                        if d is None or d["status"] not in ("open", "split", "executing"):
+                            self._send_json({"error": "La decisión seleccionada ya no admite mensajes; abrí una nueva."}, 409)
+                            return
+                    elif not payload.get("force_new"):
+                        d = conn.execute(
+                            """
+                            SELECT id, thread, status FROM decisions
+                            WHERE status IN ('open', 'split')
+                            ORDER BY id DESC LIMIT 1
+                            """
+                        ).fetchone()
                     if d is None:
                         if _es_solo_segui(body):
                             # no hay nada para reabrir: abrir una decisión
@@ -472,7 +491,11 @@ class Handler(BaseHTTPRequestHandler):
                                        f"continuar (o abortá con el botón).",
                         }
                     else:
-                        result = board.human_message(conn, d["thread"], body)
+                        action = payload.get("action")
+                        if action is not None:
+                            result = board.human_message(conn, d["thread"], body, action=action)
+                        else:
+                            result = board.human_message(conn, d["thread"], body)
                         if result.get("reopened_decision"):
                             result = {
                                 **result, "decision_id": result["reopened_decision"],

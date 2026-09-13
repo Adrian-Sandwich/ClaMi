@@ -628,3 +628,60 @@ body {
     text-decoration: none;
     border-bottom: 1px dotted;
 }
+
+/* Operator controls: preserve the original MAGI geometry above. */
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+body { color: #e6d3b7; font-family: 'Lucida Console', monospace; }
+button, input, textarea { font: inherit; }
+button { background: #160e05; color: #ffc06f; border: 1px solid #8f622c; padding: 9px 12px; cursor: pointer; }
+button:hover { background: #332008; border-color: #ff8d00; }
+button:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid #52e691; outline-offset: 4px; }
+.console-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding-bottom: 14px; font-size: 12px; }
+.console-toolbar strong { margin-right: auto; color: #ff8d00; letter-spacing: .08em; }
+#connection-status { color: #b7d2b9; font-size: 11px; }
+.volume-control { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.volume-control input { width: 80px; accent-color: #ff8d00; }
+.statusbar { white-space: normal; line-height: 1.5; font-size: 14px; padding: 16px 4px; }
+#conversation { min-height: 110px; max-height: 350px; padding: 12px; border: 1px solid #4a341c; background: #080604; }
+#conversation .welcome { color: #c4aa89; }
+#conversation .body { overflow-wrap: anywhere; line-height: 1.65; }
+.composer { padding-top: 16px; }
+.composer .modes { display: inline-flex; }
+.composer .modes button { padding: 10px 18px; font-size: 12px; }
+.decision-actions { float: right; display: flex; gap: 8px; }
+#c-abort { color: #ff9595; border-color: #a64b4b; }
+.input-label { display: block; clear: both; padding-top: 16px; font-size: 13px; color: #ffbd69; }
+.composer .intent { color: #d3b58b; line-height: 1.6; margin: 10px 0; font-size: 12px; }
+.composer textarea { min-height: 100px; padding: 12px; font-size: 14px; line-height: 1.6; color: #f2e3d0; }
+.composer .composer-opts { margin-top: 10px; font-size: 12px; }
+.composer .composer-opts #c-repo { padding: 9px; min-width: 0; font-size: 12px; color: #f2e3d0; }
+#repo-help { font-size: 11px; color: #c4aa89; line-height: 1.5; }
+.send-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; }
+.send-row span { font-size: 11px; color: #b6a58f; }
+#c-send { background: #ff8d00; color: #100a02; font-weight: bold; min-width: 160px; }
+.composer .composer-hint { color: #dfcdb6; line-height: 1.5; min-height: 22px; margin-top: 10px; }
+.composer .stalemate-actions { flex-wrap: wrap; }
+.stalemate-actions button[aria-pressed="true"] { background: #ff8d00; color: black; }
+#history { line-height: 2; }
+#history a { display: inline-block; padding: 6px; }
+dialog.modal { position: fixed; inset: 0; margin: auto; width: min(800px, 92vw); max-width: 92vw; max-height: 85vh; height: auto; color: #e6d3b7; overflow-y: auto; }
+dialog.modal:not([open]) { display: none; }
+dialog::backdrop { background: #000b; }
+.modal .modal-header { gap: 16px; }
+.modal .modal-body { overflow-wrap: anywhere; }
+.flicker { animation: operator-pulse 2.5s ease-in-out infinite; }
+@keyframes operator-pulse { 50% { opacity: .65; } }
+@media (prefers-reduced-motion: reduce) { .flicker { animation: none; } }
+@media (max-width: 600px) {
+  body { margin: 5px; }
+  .system { padding: 10px; }
+  .console-toolbar { gap: 9px; }
+  .console-toolbar strong { width: 100%; }
+  .decision-actions { float: none; margin-top: 10px; }
+  .send-row { align-items: stretch; flex-direction: column; }
+  .composer .composer-opts { flex-wrap: wrap; }
+  .composer .composer-opts label { width: 100%; }
+  .modal>.modal-body { font-size: 14px; }
+}

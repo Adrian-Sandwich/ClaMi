@@ -14,3 +14,6 @@ debate-mcp/launchd/backup/
 
 # repos de terceros clonados para evaluar (análisis en experiments/, no se versionan)
 experiments/
+
+# log del refresh agendado del grafo de memoria
+memory-graph/*.log

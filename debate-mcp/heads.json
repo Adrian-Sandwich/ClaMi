@@ -12,24 +12,28 @@
     },
     {
       "seat": "balthasar",
-      "name": "codex (gpt-6-astra)",
+      "name": "codex (gpt-5.1)",
       "type": "cli",
       "journal": "inline",
       "bin": "C:/Users/Adrian/src/ClaMi/debate-mcp/bin/codex.cmd",
       "args": [
-        "exec"
+        "exec",
+        "-m",
+        "gpt-5.1"
       ],
       "timeout_secs": 900,
       "tools": true
     },
     {
       "seat": "casper",
-      "name": "codex (gpt-6-astra)",
+      "name": "codex (gpt-5.1)",
       "type": "cli",
       "journal": "inline",
       "bin": "C:/Users/Adrian/src/ClaMi/debate-mcp/bin/codex.cmd",
       "args": [
-        "exec"
+        "exec",
+        "-m",
+        "gpt-5.1"
       ],
       "timeout_secs": 900,
       "tools": true
