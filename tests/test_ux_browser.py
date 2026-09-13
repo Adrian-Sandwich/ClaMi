@@ -109,3 +109,33 @@ def test_sound_transition_dedup_keyboard_and_mobile(page):
     page.set_viewport_size({"width": 390, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.screenshot(path=str(ROOT / "experiments" / "ux-mobile.png"), full_page=True)
+
+
+def test_auto_scroll_respeta_la_posicion_de_lectura(page):
+    """0b9b9c0: el auto-scroll solo baja si el usuario ya estaba en el fondo.
+    Con el scroll arriba, un frame SSE con cambios (un voto) no lo tira;
+    en el fondo, un mensaje nuevo baja hasta el final — incluida la línea
+    de 'is thinking', que se agrega ANTES de ajustar el scroll."""
+    data = snapshot()
+    data["decisions"][0]["journal"] = [
+        {"author": "melchior", "kind": "posicion", "body": f"hallazgo {i:02d} — línea del journal lo suficientemente larga como para ocupar su renglón",
+         "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}"}
+        for i in range(40)
+    ]
+    feed(page, data)
+    conv = page.locator("#conversation")
+    assert conv.evaluate("el => el.scrollHeight > el.clientHeight"), \
+        "el journal tiene que desbordar para que la posición del scroll importe"
+    # leyendo arriba: un frame con cambio (voto de una cabeza) NO lo baja
+    conv.evaluate("el => el.scrollTop = 0")
+    data["decisions"][0]["seats"][0].update(voted=True, position="yes")
+    feed(page, data)
+    assert conv.evaluate("el => el.scrollTop") == 0
+    # en el fondo: el mensaje nuevo baja hasta el final, thinking-line incluida
+    conv.evaluate("el => el.scrollTop = el.scrollHeight")
+    data["decisions"][0]["journal"].append(
+        {"author": "casper", "kind": "posicion", "body": "una observación nueva",
+         "created_at": "2026-01-01T01:00:00"})
+    feed(page, data)
+    assert conv.evaluate("el => el.scrollHeight - el.scrollTop - el.clientHeight") <= 1, \
+        "en el fondo el scroll tiene que quedar pegado al final, con la línea de thinking a la vista"

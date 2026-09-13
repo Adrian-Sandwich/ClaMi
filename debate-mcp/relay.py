@@ -107,6 +107,22 @@ AGENT_TIMEOUT_SECS = 900
 # Techo global de turnos concurrentes, sumando CLI y API.
 MAX_CONCURRENT_TRIGGERS = 4
 
+# Un disparo que no llega a arrancar (binario ausente o no ejecutable) se
+# reintenta con backoff exponencial por token; tras MAX_SPAWN_ATTEMPTS fallos
+# consecutivos se estaciona: avisa en el journal y no reintenta más hasta que
+# llegue un mensaje nuevo al thread (antes reintentaba cada 2s para siempre).
+MAX_SPAWN_ATTEMPTS = 5
+SPAWN_BACKOFF_BASE_SECS = 2
+SPAWN_BACKOFF_MAX_SECS = 60
+
+# Logs de disparo: diagnóstico reciente, no auditoría (esa vive en el
+# journal). Se guardan los últimos N por prefijo (thread_asiento_ / execute_).
+MAX_LOGS_PER_TRIGGER = 10
+
+# El JSONL de eventos es append-only: al pasar el cap se rota a una única
+# generación .1 (telemetría, no auditoría).
+EVENTS_MAX_BYTES = 10 * 1024 * 1024
+
 # Último recurso cuando el thread no dice sobre qué proyecto opina.
 DEFAULT_CWD = os.environ.get("DEBATE_DEFAULT_CWD", str(BASE_DIR.parent))
 
@@ -160,6 +176,7 @@ def load_state() -> dict:
     state.setdefault("last_id", 0)
     state.setdefault("threads", {})
     state.setdefault("pending", [])
+    state.setdefault("spawn_failures", {})
     return state
 
 
@@ -180,9 +197,22 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _rotate_events_if_needed() -> None:
+    """El JSONL de eventos crece para siempre: meses de relay arriba = un
+    archivo gigante que nada más lee entero. Al pasar EVENTS_MAX_BYTES lo
+    renombro a .1 (una sola generación) y arranco uno nuevo."""
+    try:
+        if EVENTS_PATH.stat().st_size <= EVENTS_MAX_BYTES:
+            return
+        EVENTS_PATH.replace(EVENTS_PATH.parent / f"{EVENTS_PATH.name}.1")
+    except OSError:
+        pass  # un problema de rotación no puede tumbar el registro del evento
+
+
 def event(kind: str, **fields) -> None:
     """Una línea JSON por evento. Es lo que hace medible al relay: cuántos
     disparos, cuánto tardan, cuántos fallan. `healthcheck.py` lee esto."""
+    _rotate_events_if_needed()
     rec = {"ts": now_iso(), "event": kind, **fields}
     with EVENTS_PATH.open("a") as f:
         f.write(json.dumps(rec) + "\n")
@@ -358,10 +388,33 @@ def _supervise(proc: subprocess.Popen, meta: dict) -> None:
         _inflight.discard(meta["token"])
 
 
+def _log_stamp() -> str:
+    """Marca para nombres de log de disparo con resolución de milisegundos:
+    a resolución de 1s, dos disparos del mismo asiento en el mismo segundo
+    pisaban el archivo."""
+    return datetime.now().strftime("%Y%m%dT%H%M%S_%f")[:-3]
+
+
+def _prune_trigger_logs(prefix: str, keep: int = MAX_LOGS_PER_TRIGGER) -> None:
+    """Los logs por disparo se acumulan sin tope (un relay meses arriba =
+    miles de archivos). Guardamos los últimos `keep` del prefijo: son
+    diagnóstico reciente, no auditoría (esa vive en el journal)."""
+    try:
+        logs = sorted(LOG_DIR.glob(f"{prefix}*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for stale in logs[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def trigger(seat_name: str, thread: str, since_id: int, cwd: str, prompt: str, meta: dict | None = None) -> bool:
     """Lanza al asiento CLI. Devuelve False si no llegó a arrancar — el
-    llamador lo reencola en `pending` en vez de perder el turno."""
-    ts_label = time.strftime("%Y%m%dT%H%M%S")
+    llamador lo reencola en `pending` (con backoff) en vez de perder el
+    turno."""
+    ts_label = _log_stamp()
     out_path = LOG_DIR / f"{thread}_{seat_name}_{ts_label}.log"
     meta = {
         "thread": thread, "author": seat_name, "since_id": since_id, "cwd": cwd,
@@ -371,6 +424,7 @@ def trigger(seat_name: str, thread: str, since_id: int, cwd: str, prompt: str, m
 
     try:
         f = out_path.open("w")
+        _prune_trigger_logs(f"{thread}_{seat_name}_")
         # start_new_session es POSIX (grupo de procesos para el kill en el
         # timeout); en Windows taskkill /T ya recorre el árbol de hijos.
         popen_kw = {"start_new_session": True} if os.name == "posix" else {}
@@ -397,44 +451,115 @@ def trigger(seat_name: str, thread: str, since_id: int, cwd: str, prompt: str, m
     return True
 
 
+def _spawn_failure_token(thread: str, seat: str, decision_id: int | None) -> str:
+    """La clave del backoff es el mismo token que usa el disparo: uno por
+    thread en chat libre, uno por (thread, asiento) en decisiones."""
+    return _token(thread, seat) if decision_id is not None else _token(thread)
+
+
+def _registra_fallo_de_disparo(conn, state: dict, token: str, thread: str,
+                               seat: str, cand: dict) -> None:
+    """Un disparo que no arrancó vuelve a `pending` con backoff exponencial
+    (2s, 4s, 8s... capado en SPAWN_BACKOFF_MAX_SECS). Tras MAX_SPAWN_ATTEMPTS
+    fallos consecutivos del mismo token se estaciona: avisa una vez en el
+    journal y no reintenta más hasta que llegue un mensaje nuevo al thread.
+    Antes de esto, un binario ausente reintentaba cada 2s para siempre."""
+    failures = state.setdefault("spawn_failures", {})
+    info = failures.setdefault(token, {"count": 0, "retry_at": 0})
+    info["count"] += 1
+    if info["count"] >= MAX_SPAWN_ATTEMPTS:
+        failures.pop(token, None)
+        log.error(
+            "disparo de %s en %s estacionado: %s fallos de arranque seguidos "
+            "(¿binario ausente?). No reintento más hasta que haya novedades en el thread.",
+            seat, thread, MAX_SPAWN_ATTEMPTS,
+        )
+        event("trigger_parked", thread=thread, author=seat, attempts=MAX_SPAWN_ATTEMPTS)
+        conn.execute(
+            """
+            INSERT INTO messages (thread, author, kind, body, artifact)
+            VALUES (%s, 'magi', 'resultado', %s, NULL)
+            """,
+            (thread,
+             f"DISPARO ESTACIONADO — no pude lanzar a '{seat}' tras "
+             f"{MAX_SPAWN_ATTEMPTS} intentos (¿el binario del asiento existe y "
+             f"es ejecutable?). No voy a seguir reintentando solo: arreglá el "
+             f"asiento y reactivá el thread con un mensaje nuevo."),
+        )
+        return
+    delay = min(SPAWN_BACKOFF_BASE_SECS * 2 ** (info["count"] - 1), SPAWN_BACKOFF_MAX_SECS)
+    info["retry_at"] = time.monotonic() + delay
+    state["pending"].append({**cand, "retry_at": info["retry_at"]})
+
+
+def _limpiar_fallos_de_disparo(state: dict, thread: str) -> None:
+    """Un mensaje nuevo en el thread reactiva los reintentos: es la señal del
+    operador (o del sistema) de que algo cambió."""
+    failures = state.get("spawn_failures") or {}
+    for token in [t for t in failures if t == thread or t.startswith(f"{thread}::")]:
+        failures.pop(token, None)
+
+
 # ---------------------------------------------------------------- disparo API
 
-def _run_api_turn(seat_info: dict, d: dict, memory: str | None = None) -> None:
-    """Un turno de asiento API, síncrono: journal inline → chat → voto
-    registrado con la misma lógica que cast_position. Si algo falla, el
-    error queda en eventos: pending_turns sigue viendo al asiento sin votar
-    y lo re-dispara en el próximo ciclo (con tope por decisión)."""
+def _journal_inline(conn, thread: str) -> list[dict]:
+    """Los últimos JOURNAL_LIMIT mensajes del thread, en orden cronológico.
+    Mismo corte para turnos de decisión y de chat, de asientos API e
+    inline: el prompt siempre ve la cola del journal."""
+    rows = conn.execute(
+        """
+        SELECT author, kind, body FROM messages
+        WHERE thread = %s ORDER BY id DESC LIMIT %s
+        """,
+        (thread, apihead.JOURNAL_LIMIT),
+    ).fetchall()
+    return [dict(m) for m in reversed(rows)]
+
+
+def _run_decision_turn(seat_info: dict, d: dict, producir_voto, turn: str) -> None:
+    """Un turno de decisión, síncrono: journal inline → voto (lo produce
+    `producir_voto(journal)`) → registro con la misma lógica que
+    cast_position. La conexión NO se sostiene abierta mientras el productor
+    habla con el modelo o el proceso CLI (puede bloquear 10 minutos: con la
+    conexión tomada, se acuartela un checkout de Postgres todo ese tiempo).
+    Si algo falla, el error queda en eventos: pending_turns sigue viendo al
+    asiento sin votar y lo re-dispara en el próximo ciclo (con tope por
+    decisión)."""
     start = time.monotonic()
     meta = {
         "thread": d["thread"], "author": seat_info["seat"], "token": _token(d["thread"], seat_info["seat"]),
-        "decision_id": d["id"], "round": d["round"], "turn": "api",
+        "decision_id": d["id"], "round": d["round"], "turn": turn,
     }
     try:
         with connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT author, kind, body FROM messages
-                WHERE thread = %s ORDER BY id DESC LIMIT %s
-                """,
-                (d["thread"], apihead.JOURNAL_LIMIT),
-            ).fetchall()
-            journal = [dict(m) for m in reversed(rows)]
-            vote = apihead.run_turn(seat_info, d, journal, memory=memory)
+            journal = _journal_inline(conn, d["thread"])
+        vote = producir_voto(journal)
+        with connect() as conn:
             with conn.transaction():
                 board.record_position(
                     conn, d["id"], seat_info["seat"],
                     vote["position"], vote["body"], vote["conditions"],
                 )
         log.info(
-            "asiento API %s votó %s en decisión %s (%.0fs)",
-            seat_info["seat"], vote["position"], d["id"], time.monotonic() - start,
+            "turno %s: %s votó %s en decisión %s (%.0fs)",
+            turn, seat_info["seat"], vote["position"], d["id"], time.monotonic() - start,
         )
         event("trigger_done", rc=0, timed_out=False,
               duration_s=round(time.monotonic() - start, 1), **meta)
     except Exception as exc:
-        log.error("turno API de %s en %s falló: %s", seat_info["seat"], d["thread"], exc)
+        log.error("turno %s de %s en %s falló: %s", turn, seat_info["seat"], d["thread"], exc)
         event("trigger_done", rc=1, error=str(exc),
               duration_s=round(time.monotonic() - start, 1), **meta)
+
+
+def _run_api_turn(seat_info: dict, d: dict, memory: str | None = None) -> None:
+    """Turno de asiento API: prompt + chat + parseo del tag POSITION contra
+    el endpoint OpenAI-compatible."""
+    _run_decision_turn(
+        seat_info, d,
+        lambda journal: apihead.run_turn(seat_info, d, journal, memory=memory),
+        "api",
+    )
 
 
 def _run_api_turn_bg(seat_info: dict, d: dict, memory: str | None = None) -> None:
@@ -459,28 +584,23 @@ def fire_api_turn(seat_info: dict, d: dict, memory: str | None = None) -> bool:
     return True
 
 
-# ---------------------------------------------------------------- turnos API de chat libre
+# ---------------------------------------------------------------- turnos de chat libre
 
-def _run_api_chat_turn(seat_info: dict, thread: str, since_id: int) -> None:
-    """Turno de chat libre de un asiento API: journal inline → chat → UN
-    mensaje kind='respuesta'. Mismo contrato que el disparo CLI (un mensaje
-    por turno). Si algo falla el mensaje no se inserta: el thread sigue con
-    el mismo último autor y el próximo ciclo re-dispara (reintento implícito).
-    Las cabezas API no emiten 'veredicto' — sin decisión no tienen posición
-    que votar: el humano cierra el chat con 'arbitraje' o el tope corta."""
+def _run_chat_turn(seat_info: dict, thread: str, producir_texto, turn: str) -> None:
+    """Un turno de chat libre, síncrono: journal inline → respuesta (la
+    produce `producir_texto(journal)`) → UN mensaje kind='respuesta'. Mismo
+    contrato que el disparo CLI (un mensaje por turno). Si algo falla el
+    mensaje no se inserta: el thread sigue con el mismo último autor y el
+    próximo ciclo re-dispara (reintento implícito). Las cabezas no emiten
+    'veredicto' en chat — sin decisión no tienen posición que votar: el
+    humano cierra el chat con 'arbitraje' o el tope corta."""
     start = time.monotonic()
-    meta = {"thread": thread, "author": seat_info["seat"], "token": _token(thread), "turn": "free-api"}
+    meta = {"thread": thread, "author": seat_info["seat"], "token": _token(thread), "turn": turn}
     try:
         with connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT author, kind, body FROM messages
-                WHERE thread = %s ORDER BY id DESC LIMIT %s
-                """,
-                (thread, apihead.JOURNAL_LIMIT),
-            ).fetchall()
-            journal = [dict(m) for m in reversed(rows)]
-            text = apihead.run_chat_turn(seat_info, journal)
+            journal = _journal_inline(conn, thread)
+        text = producir_texto(journal)
+        with connect() as conn:
             conn.execute(
                 """
                 INSERT INTO messages (thread, author, kind, body, artifact)
@@ -488,32 +608,39 @@ def _run_api_chat_turn(seat_info: dict, thread: str, since_id: int) -> None:
                 """,
                 (thread, seat_info["seat"], text),
             )
-        log.info("asiento API %s respondió en %s (%.0fs)",
-                 seat_info["seat"], thread, time.monotonic() - start)
+        log.info("turno %s: %s respondió en %s (%.0fs)",
+                 turn, seat_info["seat"], thread, time.monotonic() - start)
         event("trigger_done", rc=0, timed_out=False,
               duration_s=round(time.monotonic() - start, 1), **meta)
     except Exception as exc:
-        log.error("turno API de chat de %s en %s falló: %s", seat_info["seat"], thread, exc)
+        log.error("turno %s de %s en %s falló: %s", turn, seat_info["seat"], thread, exc)
         event("trigger_done", rc=1, error=str(exc),
               duration_s=round(time.monotonic() - start, 1), **meta)
 
 
-def _run_api_chat_turn_bg(seat_info: dict, thread: str, since_id: int) -> None:
+def _run_api_chat_turn(seat_info: dict, thread: str) -> None:
+    """Turno de chat libre de un asiento API (HTTP contra el endpoint)."""
+    _run_chat_turn(seat_info, thread,
+                   lambda journal: apihead.run_chat_turn(seat_info, journal),
+                   "free-api")
+
+
+def _run_api_chat_turn_bg(seat_info: dict, thread: str) -> None:
     try:
-        _run_api_chat_turn(seat_info, thread, since_id)
+        _run_api_chat_turn(seat_info, thread)
     finally:
         with _inflight_lock:
             _inflight.discard(_token(thread))
 
 
-def fire_api_chat_turn(seat_info: dict, thread: str, since_id: int) -> bool:
+def fire_api_chat_turn(seat_info: dict, thread: str) -> bool:
     """Dispara el turno de chat de un asiento API, en un thread propio."""
     with _inflight_lock:
         _inflight.add(_token(thread))
     log.info("turno API de chat %s (modelo %s) en thread %s",
              seat_info["seat"], seat_info.get("model"), thread)
     event("trigger_spawned", pid=None, thread=thread, author=seat_info["seat"], turn="free-api")
-    threading.Thread(target=_run_api_chat_turn_bg, args=(seat_info, thread, since_id), daemon=True).start()
+    threading.Thread(target=_run_api_chat_turn_bg, args=(seat_info, thread), daemon=True).start()
     return True
 
 
@@ -555,17 +682,6 @@ def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int,
     return text
 
 
-def _journal_inline(conn, thread: str) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT author, kind, body FROM messages
-        WHERE thread = %s ORDER BY id DESC LIMIT %s
-        """,
-        (thread, apihead.JOURNAL_LIMIT),
-    ).fetchall()
-    return [dict(m) for m in reversed(rows)]
-
-
 def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None = None) -> None:
     """Turno de decisión de una cabeza CLI que NO carga el MCP del tablero
     (p.ej. codex exec: en modo no interactivo no expone tools de servers
@@ -574,41 +690,22 @@ def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None 
     parsea el tag POSITION: de su salida; la salida completa queda como
     body del voto. El proceso puede investigar el repo con sus propias
     herramientas de lectura aunque no pueda votar por MCP."""
-    start = time.monotonic()
-    meta = {"thread": d["thread"], "author": seat_info["seat"],
-            "token": _token(d["thread"], seat_info["seat"]),
-            "decision_id": d["id"], "round": d["round"], "turn": "cli-inline"}
-    try:
-        with connect() as conn:
-            journal = _journal_inline(conn, d["thread"])
+    def producir_voto(journal):
         if seat_info.get("tools"):
             # cabeza con herramientas propias (codex exec y sandbox): misma
             # capacidad de investigación que la cabeza MCP, mismo contrato.
-            prompt = _prompt_inline_activo(seat_info, d, journal, memory, cwd)
+            prompt = apihead.build_inline_active_prompt(seat_info["seat"], d, journal, memory, cwd)
         else:
             system, user = apihead.build_api_prompt(seat_info["seat"], d, journal, memory=memory)
             prompt = f"{system}\n\n{user}"
         text = _run_cli_inline(
             seat_info, prompt, cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
-            token=meta["token"],
+            token=_token(d["thread"], seat_info["seat"]),
         )
-        text = apihead.strip_echo(text, prompt)
-        vote = apihead.parse_vote(text)
-        with connect() as conn:
-            with conn.transaction():
-                board.record_position(
-                    conn, d["id"], seat_info["seat"],
-                    vote["position"], vote["body"], vote["conditions"],
-                )
-        log.info("cabeza inline %s votó %s en decisión %s (%.0fs)",
-                 seat_info["seat"], vote["position"], d["id"], time.monotonic() - start)
-        event("trigger_done", rc=0, timed_out=False,
-              duration_s=round(time.monotonic() - start, 1), **meta)
-    except Exception as exc:
-        log.error("turno inline de %s en %s falló: %s", seat_info["seat"], d["thread"], exc)
-        event("trigger_done", rc=1, error=str(exc),
-              duration_s=round(time.monotonic() - start, 1), **meta)
+        return apihead.parse_vote(apihead.strip_echo(text, prompt))
+
+    _run_decision_turn(seat_info, d, producir_voto, "cli-inline")
 
 
 def _run_cli_inline_turn_bg(seat_info: dict, d: dict, cwd: str, memory: str | None = None) -> None:
@@ -635,36 +732,17 @@ def _run_cli_inline_chat_turn(seat_info: dict, thread: str, cwd: str) -> None:
     """Turno de chat libre de una cabeza journal-inline: prompt de charla,
     stdout completo posteado como UN mensaje 'respuesta' (igual contrato
     que el turno API de chat)."""
-    start = time.monotonic()
-    meta = {"thread": thread, "author": seat_info["seat"], "token": _token(thread),
-            "turn": "free-inline"}
-    try:
-        with connect() as conn:
-            journal = _journal_inline(conn, thread)
+    def producir_texto(journal):
         system, user = apihead.build_chat_prompt(seat_info["seat"], journal)
         prompt = f"{system}\n\n{user}"
         text = _run_cli_inline(
             seat_info, prompt, cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
-            token=meta["token"],
+            token=_token(thread),
         )
-        text = apihead.strip_echo(text, prompt).strip()
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO messages (thread, author, kind, body, artifact)
-                VALUES (%s, %s, 'respuesta', %s, NULL)
-                """,
-                (thread, seat_info["seat"], text),
-            )
-        log.info("cabeza inline %s respondió en %s (%.0fs)",
-                 seat_info["seat"], thread, time.monotonic() - start)
-        event("trigger_done", rc=0, timed_out=False,
-              duration_s=round(time.monotonic() - start, 1), **meta)
-    except Exception as exc:
-        log.error("turno inline de chat de %s en %s falló: %s", seat_info["seat"], thread, exc)
-        event("trigger_done", rc=1, error=str(exc),
-              duration_s=round(time.monotonic() - start, 1), **meta)
+        return apihead.strip_echo(text, prompt).strip()
+
+    _run_chat_turn(seat_info, thread, producir_texto, "free-inline")
 
 
 def _run_cli_inline_chat_turn_bg(seat_info: dict, thread: str, cwd: str) -> None:
@@ -767,6 +845,9 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
             log.warning("techo de %s turnos concurrentes, encolo %s", MAX_CONCURRENT_TRIGGERS, turn["seat"])
             state["pending"].append({"id": state["last_id"], "thread": d["thread"], "author": turn["seat"]})
             continue
+        failure = (state.get("spawn_failures") or {}).get(token)
+        if failure and time.monotonic() < failure["retry_at"]:
+            continue  # en backoff de un fallo de arranque: se reintenta cuando venza
         seat_info = heads.seat_by_name(turn["seat"])
         if seat_info is None:
             log.error("asiento %s ya no está en el registry, no lo puedo disparar", turn["seat"])
@@ -776,10 +857,12 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
             # cabeza CLI sin MCP (codex exec): prompt con journal inlineado
             # por stdin y voto parseado del stdout.
             if fire_cli_inline_turn(seat_info, d, cwd, memoria):
+                state["spawn_failures"].pop(token, None)
                 ts["triggers"] += 1
             continue
         if seat_info.get("type") == "api":
             if fire_api_turn(seat_info, d, memoria):
+                state["spawn_failures"].pop(token, None)
                 ts["triggers"] += 1
             continue
         if not seat_info.get("bin"):
@@ -789,15 +872,18 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
             continue
         prompt = decision.build_head_prompt(turn["seat"], _persona_text(turn["seat"]), d, since_id, memory=memoria)
         meta = {"decision_id": d["id"], "round": turn["round"], "turn": turn["kind"]}
+        cand = {"id": state["last_id"], "thread": d["thread"], "author": turn["seat"]}
         if trigger(turn["seat"], d["thread"], since_id, cwd, prompt, meta):
+            state["spawn_failures"].pop(token, None)
             ts["triggers"] += 1
         else:
-            state["pending"].append({"id": state["last_id"], "thread": d["thread"], "author": turn["seat"]})
+            _registra_fallo_de_disparo(conn, state, token, d["thread"], turn["seat"], cand)
 
 
 # ---------------------------------------------------------------- ciclo
 
 def process_cycle(conn, state: dict) -> None:
+    state.setdefault("spawn_failures", {})
     rows = conn.execute(
         """
         SELECT id, thread, author, kind FROM messages
@@ -814,13 +900,22 @@ def process_cycle(conn, state: dict) -> None:
         if r["kind"] == "analisis":
             ts["triggers"] = 0
             ts["capped_notified"] = False
+            # un 'analisis' nuevo también reactiva los disparos estacionados
+            _limpiar_fallos_de_disparo(state, r["thread"])
         candidates[r["thread"]] = {"id": r["id"], "thread": r["thread"], "author": r["author"], "kind": r["kind"]}
         state["last_id"] = r["id"]
 
-    # Lo que quedó sin disparar en ciclos anteriores, si no lo pisó algo nuevo.
+    # Lo que quedó sin disparar en ciclos anteriores, si no lo pisó algo nuevo
+    # y ya venció su backoff de reintento (los disparos que fallaron vuelven
+    # con retry_at; los demás se reintentan de una).
+    retained = []
     for p in state["pending"]:
+        retry_at = p.get("retry_at")
+        if retry_at is not None and time.monotonic() < retry_at:
+            retained.append(p)
+            continue
         candidates.setdefault(p["thread"], p)
-    state["pending"] = []
+    state["pending"] = retained
 
     open_decisions = fetch_open_decisions(conn)
     journal_threads = {d["thread"] for d in open_decisions}
@@ -895,7 +990,7 @@ def process_cycle(conn, state: dict) -> None:
             # el round-robin también sirve para cabezas API (Ollama y
             # compatibles): sin esto, el chat se colgaba cada vez que tocaba
             # un asiento sin binario — exigía un CLI que no existe.
-            if fire_api_chat_turn(seat_info, thread, cand["id"] - 1):
+            if fire_api_chat_turn(seat_info, thread):
                 ts["triggers"] += 1
             else:
                 state["pending"].append(cand)
@@ -905,9 +1000,10 @@ def process_cycle(conn, state: dict) -> None:
         # justo el mensaje que disparó este trigger
         prompt = build_prompt(thread, cand["id"] - 1, cand["author"], other)
         if trigger(other, thread, cand["id"] - 1, cwd, prompt, meta={"turn": "free"}):
+            state["spawn_failures"].pop(_token(thread), None)
             ts["triggers"] += 1
         else:
-            state["pending"].append(cand)
+            _registra_fallo_de_disparo(conn, state, _token(thread), thread, other, cand)
 
     # --- decisiones MAGI: el motor dice qué turnos faltan; nosotros disparamos
     for d in open_decisions:
@@ -1069,6 +1165,12 @@ def _execute_plan(d: dict, cwd: str) -> None:
         seat = executor_seat()
         if seat is None:
             raise RuntimeError("ningun asiento puede ejecutar (sin binario en el registry)")
+        if seat.get("type", "cli") == "cli" and not Path(seat["bin"]).exists():
+            # Fallar ACÁ, antes de crear la rama/worktree: el binario ausente
+            # no es razón para churn de git ni para reintentos calientes.
+            raise RuntimeError(
+                f"el binario del ejecutor ({seat['seat']}) no existe: {seat['bin']}"
+            )
         run = production.plan(cwd, d["id"], (d.get("minority_report") or {}).get("execution"))
         rama, base = run["branch"], run["base_branch"]
         # Persist the immutable base before creating a worktree so retries
@@ -1084,7 +1186,7 @@ def _execute_plan(d: dict, cwd: str) -> None:
             )
         cwd = production.prepare(run)
         prompt = _prompt_ejecucion(d, base, _condiciones_aprobacion(d))
-        ts_label = time.strftime("%Y%m%dT%H%M%S")
+        ts_label = _log_stamp()
         out_path = LOG_DIR / f"execute_{d['thread']}_{ts_label}.log"
         log.info("ejecutando plan de %s en %s (%s) -> %s",
                  d["thread"], cwd, seat["seat"], out_path.name)
@@ -1092,6 +1194,7 @@ def _execute_plan(d: dict, cwd: str) -> None:
               decision_id=d["id"], round=d.get("round"), turn="execute")
         timed_out = False
         with out_path.open("w", encoding="utf-8") as f:
+            _prune_trigger_logs(f"execute_{d['thread']}_")
             proc = subprocess.Popen(
                 [seat["bin"], *seat.get("args", []), prompt],
                 cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
@@ -1125,7 +1228,14 @@ def _execute_plan(d: dict, cwd: str) -> None:
                     "SELECT status FROM decisions WHERE id = %s FOR UPDATE", (d["id"],)
                 ).fetchone()
                 if not active or active["status"] != "executing":
-                    return  # An abort while the agent exited wins over publication.
+                    # Un abort mientras el agente salía gana sobre la
+                    # publicación: el disparo igual terminó; sin este
+                    # trigger_done el evento trigger_spawned queda abierto
+                    # y el JSONL de métricas se tuerce.
+                    event("trigger_done", rc=-1, timed_out=False,
+                          error="abortado: la decisión cerró antes de publicar la revisión",
+                          duration_s=round(time.monotonic() - start, 1), **meta)
+                    return
                 rev = board.start_decision(
                     conn,
                     title=f"Revisar implementación de #{d['id']}: {d['title']}",
@@ -1341,44 +1451,6 @@ def _reap_closed_decision_procs(conn) -> None:
         event("trigger_done", rc=-1, timed_out=False,
               error="abortado: la decisión cerró", thread=thread,
               author=token.split("::")[-1], token=token)
-
-
-
-def _prompt_inline_activo(seat_info: dict, d: dict, journal: list[dict],
-                          memory: str | None, cwd: str) -> str:
-    """Prompt de decisión para una cabeza CLI-sin-MCP que SÍ tiene
-    herramientas (codex exec con sandbox, p.ej.). Mismo contrato de voto que
-    las demás, pero con capacidad de investigación simétrica a la cabeza MCP:
-    las personalidades sesgan el criterio, no las capacidades — si sólo una
-    cabeza puede mirar el repo, el consejo entero queda sesgado a lo que esa
-    cabeza ve."""
-    try:
-        persona = personas.system_prompt(seat_info["seat"])
-    except ValueError:
-        persona = f"Sos el asiento '{seat_info['seat']}' del sistema MAGI."
-    history = "\n\n".join(
-        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:apihead.BODY_CHARS]}"
-        for m in journal
-    ) or "(journal vacío)"
-    memoria_txt = f"\n\n{memory}" if memory else ""
-    return (
-        f"{persona}\n\n"
-        f"Decisión #{d['id']} (protocolo {d['protocol']}, ronda {d['round']}): {d['title']}\n"
-        f"Artefacto sobre el que se decide: {d.get('artifact') or '—'} "
-        f"(tu directorio de trabajo es {cwd})\n"
-        f"{memoria_txt}\n\n"
-        f"Journal del debate hasta ahora:\n{history}\n\n"
-        "Antes de votar, INVESTIGÁ con tus herramientas: leé los archivos del "
-        "repo que importen, corré comandos de SOLO LECTURA (git status/diff, "
-        "grep, tests si aplican). No modifiques nada.\n"
-        "Tu respuesta FINAL termina SIEMPRE con esta estructura y nada fuera "
-        "de ella después:\n"
-        "POSITION: yes|no|conditional|info\n"
-        "CONDITIONS: <condiciones separadas por ;> (sólo si position=conditional)\n"
-        "<tu razonamiento completo, citando lo que viste>\n\n"
-        "Votá desde tu eje, no desde el consenso esperado. Si es la ronda 2 o "
-        "más, revisá tu posición anterior a la luz de las otras cabezas."
-    )
 
 
 if __name__ == "__main__":

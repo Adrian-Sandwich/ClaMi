@@ -88,3 +88,50 @@ def test_executor_spawn_error_is_persisted_for_manual_retry(monkeypatch):
     calls = conn.execute.call_args_list
     assert any('"execution_state": "failed"' in c.args[0] for c in calls)
     assert any("EJECUCIÓN FALLIDA" in str(c.args) for c in calls)
+
+
+def test_abort_durante_la_publicacion_cierra_el_evento_del_disparo(monkeypatch, tmp_path):
+    """El operador aborta mientras el ejecutor sale: la publicación se
+    cancela (return temprano) pero el evento trigger_spawned del disparo
+    tiene que cerrarse con trigger_done rc=-1 — sin esto el JSONL de
+    métricas quedaba con un disparo abierto."""
+    import sys
+
+    monkeypatch.setattr(relay, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(relay.heads, "load", lambda: [
+        {"seat": "ejec", "name": "x", "type": "cli", "executor": True,
+         "bin": sys.executable, "args": []},
+    ])
+    monkeypatch.setattr(relay.production, "plan",
+                        lambda cwd, did, prev: {"branch": "magi/d1", "base_branch": "main"})
+    monkeypatch.setattr(relay.production, "prepare", lambda run: str(tmp_path))
+    monkeypatch.setattr(relay.production, "review_target", lambda run: ("sha1", "diff"))
+
+    proc = Mock()
+    proc.wait.return_value = 0
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: proc)
+
+    conn = Mock()
+    conn.transaction.side_effect = lambda: nullcontext()
+
+    def execute(query, params=()):
+        result = Mock()
+        if "SELECT status FROM decisions" in query:
+            # abort: al volver el ejecutor, la decisión ya no está 'executing'
+            result.fetchone.return_value = {"status": "closed"}
+        return result
+
+    conn.execute.side_effect = execute
+    monkeypatch.setattr(relay, "connect", lambda: nullcontext(conn))
+
+    events = []
+    monkeypatch.setattr(relay, "event", lambda kind, **kw: events.append((kind, kw)))
+
+    relay._execute_plan({"id": 1, "thread": "d1", "title": "plan",
+                         "minority_report": None}, str(tmp_path))
+
+    done = [kw for kind, kw in events if kind == "trigger_done"]
+    assert len(done) == 1, "el disparo se cerró una sola vez"
+    assert done[0]["rc"] == -1 and "abortado" in done[0]["error"]
+    assert not any("EJECUCIÓN FALLIDA" in str(c.args)
+                   for c in conn.execute.call_args_list), "el abort no es un fallo"

@@ -142,6 +142,8 @@ def post_message(
         raise ValueError(f"author inválido: {author!r} (válidos: {sorted(_authors())})")
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r} (válidos: {sorted(KINDS)})")
+    if kind == "arbitraje" and author != "adrian":
+        raise ValueError("kind='arbitraje' es solo de adrian: cierra una decisión split con ruling humano")
     _validate_thread(thread)
     with connect() as conn:
         row = conn.execute(

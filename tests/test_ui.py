@@ -4,8 +4,10 @@ board de mentira. Nada toca Postgres ni el registry real."""
 
 import http.client
 import json
+import queue
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -62,10 +64,22 @@ class FakeUiConn:
             rows = [p for p in self.positions if p["decision_id"] in params[0]]
         elif q.startswith("SELECT thread, author, kind, body, created_at"):
             # journal de decisiones: threads dados, filtrado por kinds de
-            # conversación (params[1]), en DESC — build_state revierte
+            # conversación (params[1]), en DESC — build_state revierte.
+            # La query real acota por thread (row_number por partición,
+            # params[2]): el hilo más hablador no se come el journal de
+            # las demás.
             threads, kinds = params[0], params[1]
+            limite = params[2] if len(params) > 2 else None
             rows = [m for m in self.messages
                     if m["thread"] in threads and m["kind"] in kinds][::-1]
+            if limite is not None:
+                vistos: dict[str, int] = {}
+                acotados = []
+                for m in rows:
+                    if vistos.get(m["thread"], 0) < limite:
+                        vistos[m["thread"]] = vistos.get(m["thread"], 0) + 1
+                        acotados.append(m)
+                rows = acotados
         elif q.startswith("SELECT id, thread, status FROM decisions"):
             if "WHERE id = %s" in q:
                 return _R([d for d in self.decisions if d["id"] == params[0]])
@@ -184,6 +198,12 @@ def test_sse_frame_es_data_json_utf8():
 
 # ------------------------------------------------------------ server HTTP
 
+# Toda request autenticada manda X-Magi-Token (o ?token= en el SSE). Los
+# helpers lo mandan siempre; los tests de seguridad usan _raw_* para
+# simular un proceso local sin token.
+HEADERS = {"Content-Type": "application/json", "X-Magi-Token": magi_ui.TOKEN}
+
+
 @pytest.fixture
 def ui_server(monkeypatch):
     started = {}
@@ -206,8 +226,19 @@ def ui_server(monkeypatch):
 
 def _get(port, path):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path, headers={"X-Magi-Token": magi_ui.TOKEN})
+    return conn.getresponse()
+
+
+def _get_raw(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("GET", path)
     return conn.getresponse()
+
+
+def _get_index(port):
+    resp = _get(port, "/")
+    return resp, resp.read()
 
 
 def test_get_index_y_estaticos(ui_server):
@@ -217,6 +248,16 @@ def test_get_index_y_estaticos(ui_server):
         assert resp.status == 200, path
         assert ctype in resp.getheader("Content-Type"), path
         assert len(resp.read()) > 100
+
+
+def test_get_index_inyecta_el_token_de_sesion(ui_server):
+    """El token se imprime en consola y se inyecta en el HTML: la SPA lo
+    lee de window.MAGI_TOKEN y lo devuelve en cada request."""
+    port, _ = ui_server
+    resp, body = _get_index(port)
+    assert resp.status == 200
+    assert b"__MAGI_TOKEN__" not in body, "el placeholder se reemplaza al servir"
+    assert magi_ui.TOKEN.encode() in body
 
 
 def test_get_state_devuelve_el_snapshot(ui_server):
@@ -230,7 +271,7 @@ def test_get_state_devuelve_el_snapshot(ui_server):
 def test_get_events_envia_frame_inicial(ui_server):
     port, _ = ui_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request("GET", "/events")
+    conn.request("GET", f"/events?token={magi_ui.TOKEN}")
     resp = conn.getresponse()
     assert resp.status == 200
     assert "text/event-stream" in resp.getheader("Content-Type")
@@ -240,22 +281,72 @@ def test_get_events_envia_frame_inicial(ui_server):
     conn.close()
 
 
+# ------------------------------------------------------------ token de sesión
+
+def test_post_sin_token_devuelve_403(ui_server, monkeypatch):
+    """Cualquier proceso local podía manejar el consejo: sin el token de
+    sesión, los POST se rechazan antes de tocar el board."""
+    port, started = ui_server
+    monkeypatch.setattr(
+        magi_ui.board, "start_decision",
+        lambda *a, **kw: pytest.fail("sin token no tiene que llegar al board"),
+    )
+    for path, payload in (("/start", {"title": "x"}),
+                          ("/message", {"mode": "message", "body": "hola"}),
+                          ("/abort", {"decision_id": 1})):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        assert resp.status == 403, path
+        resp.read()
+    assert started == {}
+
+
+def test_post_con_token_falso_devuelve_403(ui_server):
+    port, _ = ui_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/message", json.dumps({"mode": "message", "body": "hola"}),
+                 {"Content-Type": "application/json", "X-Magi-Token": "bogus"})
+    resp = conn.getresponse()
+    assert resp.status == 403
+    resp.read()
+
+
+def test_get_fs_y_events_sin_token_devuelven_403(ui_server_conn):
+    port, _, _ = ui_server_conn
+    assert _get_raw(port, "/fs").status == 403
+    assert _get_raw(port, f"/events?token=bogus").status == 403
+    resp = _get_raw(port, "/events")
+    assert resp.status == 403
+    resp.read()
+
+
 def test_post_start_abre_decision_y_propaga_errores(ui_server):
     port, started = ui_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("POST", "/start", json.dumps({
         "title": "¿Hubo ataque?", "artifact": "/a.log", "protocol": "adaptive",
-    }), {"Content-Type": "application/json"})
+    }), HEADERS)
     resp = conn.getresponse()
     assert resp.status == 201
     body = json.loads(resp.read())
     assert body["decision_id"] == 99
     assert started["protocol"] == "adaptive"
+    assert started["production"] is False, "production no se infiere del artifact"
 
-    conn.request("POST", "/start", json.dumps({"title": ""}), {"Content-Type": "application/json"})
+    conn.request("POST", "/start", json.dumps({"title": ""}), HEADERS)
     resp = conn.getresponse()
     assert resp.status == 400
     assert "error" in json.loads(resp.read())
+
+
+def test_post_start_con_flag_production_explicito(ui_server):
+    """production es un flag booleano del JSON: con artifact + production
+    true llega a start_decision como production."""
+    port, started = ui_server
+    resp = _post(port, "/start", {"title": "deploy", "artifact": "/repo", "production": True})
+    assert resp.status == 201
+    assert started["production"] is True
 
 
 def test_post_start_con_body_mal_codificado_devuelve_400(ui_server):
@@ -264,8 +355,7 @@ def test_post_start_con_body_mal_codificado_devuelve_400(ui_server):
     respuesta. Hoy es un 400 como cualquier otro JSON inválido."""
     port, started = ui_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request("POST", "/start", b'{"title": "Decisi\xF3n"}',
-                 {"Content-Type": "application/json"})
+    conn.request("POST", "/start", b'{"title": "Decisi\xF3n"}', HEADERS)
     resp = conn.getresponse()
     assert resp.status == 400
     assert "error" in json.loads(resp.read())
@@ -276,7 +366,7 @@ def test_post_start_con_body_mal_codificado_devuelve_400(ui_server):
 
 def _post(port, path, payload):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+    conn.request("POST", path, json.dumps(payload), HEADERS)
     return conn.getresponse()
 
 
@@ -484,33 +574,50 @@ def test_post_abort_cierra_la_decision(ui_server_conn, monkeypatch):
     assert calls["id"] == 2
 
 
-def test_council_con_repo_implica_production_siempre(ui_server_conn):
-    """Con artefacto, production es siempre: lo aprobado se ejecuta ahí.
-    El flag del payload se ignora — el checkbox desapareció de la UI."""
+def test_council_con_repo_sin_flag_no_es_production(ui_server_conn):
+    """El server NO infiere production desde el artifact: el flag tiene que
+    venir explícito en el JSON. Antes, cualquier pregunta con repo era un
+    plan auto-ejecutable que mergea en git al aprobarse."""
     port, started, conn = ui_server_conn
     conn.decisions = [_decision(1, status="closed", ruling="yes")]
     resp = _post(port, "/message", {"mode": "council", "body": "hacer X",
                                     "artifact": "C:/repo"})
     body = json.loads(resp.read())
     assert resp.status == 201
-    assert body["production"] is True
-    assert started["production"] is True
+    assert body["production"] is False
+    assert started["production"] is False
     assert started["artifact"] == "C:/repo"
 
 
-def test_fs_lista_carpetas_y_marca_repos(ui_server_conn, tmp_path):
-    """El mini-explorador: lista subcarpetas y marca las que tienen .git."""
+def test_fs_lista_carpetas_y_marca_repos(ui_server_conn, tmp_path, monkeypatch):
+    """El mini-explorador: lista subcarpetas y marca las que tienen .git.
+    Anclado al home del usuario: acá el home es tmp_path (patcheado)."""
     (tmp_path / "proyecto-a").mkdir()
     (tmp_path / "proyecto-b").mkdir()
     (tmp_path / "proyecto-b" / ".git").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     port, _, _ = ui_server_conn
     resp = _get(port, f"/fs?path={tmp_path}")
     assert resp.status == 200
     data = json.loads(resp.read())
     assert data["path"] == str(tmp_path)
-    assert data["parent"] == str(tmp_path.parent)
+    assert data["parent"] is None, "en la raíz del home no hay 'subir'"
     marcas = {d["name"]: d["git"] for d in data["dirs"]}
     assert marcas == {"proyecto-a": False, "proyecto-b": True}
+
+
+def test_fs_rechaza_paths_fuera_del_home(ui_server_conn, tmp_path, monkeypatch):
+    """/?path= lista CUALQUIER carpeta del disco: ahora el path resuelto
+    tiene que quedar dentro del home o es 403 (.. y symlinks incluidos)."""
+    fuera = tmp_path / "fuera"
+    fuera.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    port, _, _ = ui_server_conn
+    for pedido in (str(fuera), str(tmp_path / "home" / ".." / "fuera")):
+        resp = _get(port, f"/fs?path={pedido}")
+        assert resp.status == 403, pedido
+        assert "fuera del home" in json.loads(resp.read())["error"]
 
 
 def test_segui_solo_en_open_responde_hint_sin_gastar_turno(ui_server_conn, monkeypatch):
@@ -577,3 +684,120 @@ def test_force_new_abre_decision_nueva_aunque_haya_una_abierta(ui_server_conn, m
     assert body["action"] == "opened"
     assert body["decision_id"] == 99
     assert started["title"] == "otra consulta aparte"
+
+
+# ------------------------------------------------------------ ruling desconocido
+
+def test_badge_ruling_desconocido_no_explota_y_broadcast_sobrevive():
+    """Fila tocada a mano / tipo de ruling futuro: .get con fallback en vez
+    de KeyError — el crash anterior mataba el push SSE para todos los
+    clientes (pasaba adentro de _broadcast(build_state(...)) del listener)."""
+    d = _decision(7, status="closed", ruling="corregido-a-mano")
+    b = magi_ui.verdict_badge(d)
+    assert b["text"] == "ERROR" and b["color"] == "gray" and b["flicker"] is False
+    magi_ui._broadcast({"decisions": [magi_ui.verdict_badge(d)]})
+
+
+# ------------------------------------------------------------ journal por thread
+
+def test_build_state_journal_acotado_por_thread():
+    """Un thread chatty no se come el journal de los demás: el límite es
+    por thread (row_number), no global."""
+    conn = FakeUiConn()
+    conn.messages = (
+        [{"thread": "d2", "author": "melchior", "kind": "posicion", "body": f"m{i:02d}",
+          "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc)} for i in range(15)]
+        + [{"thread": "d1", "author": "magi", "kind": "resultado", "body": "cierre",
+            "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc)}]
+    )
+    state = magi_ui.build_state(conn)
+    por_id = {d["id"]: d for d in state["decisions"]}
+    assert [m["body"] for m in por_id[1]["journal"]] == ["cierre"], \
+        "las 15 de d2 no debieron acapar el límite global"
+    assert [m["body"] for m in por_id[2]["journal"]] == [f"m{i:02d}" for i in range(3, 15)], \
+        "quedan las últimas JOURNAL_MESSAGES en orden cronológico"
+
+
+# ------------------------------------------------------------ body de POST
+
+def test_post_body_gigante_devuelve_413(ui_server):
+    """El body JSON tiene tope (64 KB): un Content-Length enorme se rechaza
+    sin leer nada, no se aguanta en memoria."""
+    port, _ = ui_server
+    resp = _post(port, "/message", {"mode": "message", "body": "x" * (70 * 1024)})
+    assert resp.status == 413
+
+
+def test_post_content_length_roto_devuelve_400(ui_server):
+    """Content-Length no numérico: era una excepción fuera del try que
+    dejaba el handler sin responder; hoy es un 400."""
+    port, _ = ui_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.putrequest("POST", "/message")
+    conn.putheader("Content-Length", "doce")
+    conn.putheader("X-Magi-Token", magi_ui.TOKEN)
+    conn.endheaders()
+    resp = conn.getresponse()
+    assert resp.status == 400
+    assert "error" in json.loads(resp.read())
+
+
+# ------------------------------------------------------------ fan-out SSE
+
+def _cliente_registrado():
+    q = queue.Queue(maxsize=magi_ui.SSE_QUEUE_MAX)
+    with magi_ui.CLIENTS_LOCK:
+        magi_ui.CLIENTS.append(q)
+    return q
+
+
+def _cliente_baja(q):
+    with magi_ui.CLIENTS_LOCK:
+        if q in magi_ui.CLIENTS:
+            magi_ui.CLIENTS.remove(q)
+
+
+def test_push_sin_clientes_no_construye_estado(monkeypatch):
+    """Con cero clientes conectados no se gasta un build_state (varias
+    queries) en cada NOTIFY ni en cada poll."""
+    with magi_ui.CLIENTS_LOCK:
+        previos = list(magi_ui.CLIENTS)
+        magi_ui.CLIENTS.clear()
+    try:
+        monkeypatch.setattr(magi_ui, "build_state",
+                            lambda conn: pytest.fail("sin clientes no se construye nada"))
+        magi_ui._push(object())
+    finally:
+        with magi_ui.CLIENTS_LOCK:
+            magi_ui.CLIENTS.extend(previos)
+
+
+def test_broadcast_no_reenvia_frame_identico():
+    """Frame byte-idéntico al último enviado: no se reenvía (el poll de
+    POLL_SECS queda en paz cuando el tablero no cambió)."""
+    q = _cliente_registrado()
+    try:
+        estado = {"decisions": [{"id": "test-dedup"}]}
+        magi_ui._broadcast(estado)
+        assert q.qsize() == 1
+        magi_ui._broadcast(estado)
+        assert q.qsize() == 1, "frame duplicado: no tiene que reenviarse"
+        magi_ui._broadcast({"decisions": [{"id": "test-dedup-2"}]})
+        assert q.qsize() == 2
+    finally:
+        _cliente_baja(q)
+
+
+def test_broadcast_descarta_cliente_con_cola_llena(capfd):
+    """Cola llena = cliente colgado (laptop dormida, tab congelada): se lo
+    larga de CLIENTS con un log en vez de acumular frames para siempre."""
+    q = _cliente_registrado()
+    for _ in range(magi_ui.SSE_QUEUE_MAX):
+        q.put_nowait(b"frame viejo")
+    try:
+        magi_ui._broadcast({"decisions": [{"id": "test-drop"}]})
+        with magi_ui.CLIENTS_LOCK:
+            assert q not in magi_ui.CLIENTS
+        assert "descartado" in capfd.readouterr().err
+    finally:
+        _cliente_baja(q)

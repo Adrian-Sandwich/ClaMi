@@ -14,6 +14,11 @@ const SEAT_COLORS = {
   adrian: "#d8d8d8",
   magi: "#ff8d00",
 };
+// Colores que el server usa en badges/identidades. Los valores se interpolan
+// en atributos style: si una fila manual o un tipo futuro trae otra cosa,
+// mejor un color neutro que CSS inyectado.
+const SAFE_COLORS = new Set(["#52e691", "#a41413", "#ff8d00", "#3caee0", "#d8d8d8", "gray"]);
+function safeColor(c) { return SAFE_COLORS.has(c) ? c : "#d8d8d8"; }
 const POSITION_COLORS = {
   yes: "#52e691",
   no: "#a41413",
@@ -22,6 +27,22 @@ const POSITION_COLORS = {
   pending: "black",
 };
 
+// Token de sesión: lo inyecta magi_ui.py al servir index.html. Cada POST lo
+// manda en X-Magi-Token; el SSE (que no puede mandar headers) va por ?token=.
+const MAGI_TOKEN = window.MAGI_TOKEN || "";
+
+function postJSON(url, payload) {
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Magi-Token": MAGI_TOKEN },
+    body: JSON.stringify(payload),
+  });
+}
+
+function fetchJSON(url) {
+  return fetch(url, { headers: { "X-Magi-Token": MAGI_TOKEN } });
+}
+
 let state = null;
 let focusedId = null;
 let uiMode = "council";   // council | chat
@@ -29,6 +50,7 @@ let newDraft = false;
 let sending = false;
 let connected = false;
 let replyAction = "resume";
+let replyFocusId = null;  // decisión para la que replyAction tiene sentido
 let magiSignature = "";
 let conversationSignature = "";
 
@@ -112,8 +134,8 @@ function renderMagi(d) {
 
   const resp = document.createElement("div");
   resp.className = "response" + (d && d.badge.flicker ? " flicker" : "");
-  resp.style.color = d ? d.badge.color : "#ff8d00";
-  resp.style.borderColor = d ? d.badge.color : "#ff8d00";
+  resp.style.color = d ? safeColor(d.badge.color) : "#ff8d00";
+  resp.style.borderColor = d ? safeColor(d.badge.color) : "#ff8d00";
   const inner = document.createElement("div");
   inner.className = "inner";
   inner.textContent = d ? d.badge.text : "STANDBY";
@@ -166,13 +188,11 @@ function renderConversation(d) {
   // re-renderiza, y bajar siempre el scroll no lo dejaba leer el historial.
   const estabaAbajo = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.innerHTML = msgs.map(m => {
-    const color = SEAT_COLORS[m.author] ?? "#d8d8d8";
+    const color = safeColor(SEAT_COLORS[m.author] ?? "#d8d8d8");
     const who = m.author === "adrian" ? "YOU" : m.author.toUpperCase();
     return `<div class="msg"><span class="who" style="color:${color}">${esc(who)}</span>` +
            `<span class="body" style="border-color:${color}">${esc(m.body || "")}</span></div>`;
   }).join("");
-  if (estabaAbajo) el.scrollTop = el.scrollHeight;
-
   const thinking = uiMode === "chat" ? [] : thinkingSeats(d);
   if (thinking.length) {
     const t = document.createElement("div");
@@ -180,6 +200,9 @@ function renderConversation(d) {
     t.textContent = "· " + thinking.map(s => s.toUpperCase() + " is thinking…").join(" · ");
     el.appendChild(t);
   }
+  // el snap va DESPUÉS de agregar la línea de thinking: si ajustaba antes,
+  // la línea quedaba bajo el fold y el usuario no veía quién está pensando.
+  if (estabaAbajo) el.scrollTop = el.scrollHeight;
 }
 
 function renderHistory() {
@@ -187,7 +210,7 @@ function renderHistory() {
   const list = state?.decisions ?? [];
   if (!list.length) { el.innerHTML = ""; return; }
   el.innerHTML = '<span class="h-label">HISTORY&nbsp;</span>' + list.map(d =>
-    `<a href="#" data-id="${d.id}" aria-current="${!newDraft && d.id === focusedId ? 'true' : 'false'}" style="color:${d.badge.color}">#${d.id} ${esc(d.badge.text)}` +
+    `<a href="#" data-id="${d.id}" aria-current="${!newDraft && d.id === focusedId ? 'true' : 'false'}" style="color:${safeColor(d.badge.color)}">#${d.id} ${esc(d.badge.text)}` +
     ` <span class="h-title">— ${esc(d.title)}</span></a>`
   ).join(" &middot; ");
   el.querySelectorAll("a").forEach(a => a.addEventListener("click", ev => {
@@ -195,7 +218,6 @@ function renderHistory() {
     if (sending) return;
     focusedId = Number(a.dataset.id);
     newDraft = false;
-    replyAction = "resume";
     uiMode = "council";
     syncModes();
     render();
@@ -257,6 +279,14 @@ function renderIntent(d) {
 
 function render() {
   const d = focused();
+  if ((d?.id ?? null) !== replyFocusId) {
+    // la decisión enfocada cambió (history click, frame SSE, cierre): la
+    // acción elegida para el STALEMATE anterior no se hereda a la nueva —
+    // sin esto, un Enter después de arbitrar cerraba la próxima split
+    // "con tu ruling" sin intención.
+    replyFocusId = d?.id ?? null;
+    replyAction = "resume";
+  }
   renderMagi(d);
   renderStatusBar(d);
   renderConversation(d);
@@ -316,7 +346,7 @@ let fsCurrent = null;
 
 async function fsLoad(path) {
   const url = path ? `/fs?path=${encodeURIComponent(path)}` : "/fs";
-  const resp = await fetch(url);
+  const resp = await fetchJSON(url);
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error || resp.statusText);
   fsCurrent = data.path;
@@ -327,10 +357,18 @@ async function fsLoad(path) {
         `<span class="dir" data-path="${esc(d.path)}">${d.git ? '<span class="git-star">★</span>' : "▸"} ${esc(d.name)}</span>`
       ).join("")
     : '<span class="dir">(sin subcarpetas)</span>';
-  document.querySelectorAll("#fs-list .dir[data-path]").forEach(el =>
-    el.addEventListener("click", () => fsLoad(el.dataset.path).catch(err => {
+  document.querySelectorAll("#fs-list .dir[data-path]").forEach(el => {
+    const abrir = () => fsLoad(el.dataset.path).catch(err => {
       document.getElementById("c-status").textContent = `error: ${err.message}`;
-    })));
+    });
+    el.addEventListener("click", abrir);
+    // mouse-only era: las entradas también se recorren con teclado
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); abrir(); }
+    });
+  });
 }
 
 document.getElementById("c-browse").addEventListener("click", async () => {
@@ -347,7 +385,7 @@ document.getElementById("c-browse").addEventListener("click", async () => {
 });
 
 document.getElementById("fs-up").addEventListener("click", async () => {
-  const resp = await fetch(`/fs?path=${encodeURIComponent(fsCurrent)}`);
+  const resp = await fetchJSON(`/fs?path=${encodeURIComponent(fsCurrent)}`);
   const data = await resp.json();
   if (data.parent) await fsLoad(data.parent);
 });
@@ -365,10 +403,7 @@ async function abortDecision() {
   const status = document.getElementById("c-status");
   status.textContent = "aborting…";
   try {
-    const resp = await fetch("/abort", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decision_id: d.id }),
-    });
+    const resp = await postJSON("/abort", { decision_id: d.id });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     status.textContent = `decision #${d.id} aborted — running turns killed`;
@@ -421,7 +456,7 @@ async function send(forceNew = false) {
       payload.force_new = true;
     }
   }
-  // con repo, production es siempre: lo aprobado se ejecuta ahí
+  // con repo, production va explícito: lo aprobado se ejecuta ahí
   const repo = document.getElementById("c-repo").value.trim();
   if (uiMode === "council" && repo && (payload.force_new || forceNew)) {
     payload.artifact = repo;
@@ -432,12 +467,12 @@ async function send(forceNew = false) {
   render();
   MagiSound.unlock();
   status.textContent = "sending…";
+  // sin timeout, un POST colgado dejaba el composer bloqueado para siempre
+  // (sending quedaba en true): a los 30s se aborta y el finally restaura.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
   try {
-    const resp = await fetch("/message", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const resp = await postJSON("/message", payload);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     if (data.action === "opened") {
@@ -454,6 +489,7 @@ async function send(forceNew = false) {
       return;
     } else if (data.action === "arbitrated") {
       status.textContent = `decision #${data.decision_id} closed with your ruling`;
+      replyAction = "resume";  // la próxima split empieza en "resume"
     } else if (data.action === "context") {
       status.textContent = "context added — the heads will see it on their next turn";
     } else {
@@ -462,8 +498,11 @@ async function send(forceNew = false) {
     if (input.value === originalValue) input.value = "";
     MagiSound.play("send");
   } catch (err) {
-    status.textContent = `error: ${err.message}`;
+    status.textContent = err.name === "AbortError"
+      ? "error: the server did not respond in 30s — try again"
+      : `error: ${err.message}`;
   } finally {
+    clearTimeout(timeoutId);
     sending = false;
     render();
   }
@@ -475,7 +514,7 @@ document.getElementById("c-input").addEventListener("keydown", ev => {
 
 // ------------------------------------------------------------- events
 
-const events = new EventSource("/events");
+const events = new EventSource("/events?token=" + encodeURIComponent(MAGI_TOKEN));
 let soundBaseline = false;
 events.onmessage = e => {
   const next = JSON.parse(e.data);

@@ -10,6 +10,7 @@ resuelven las referencias del doc se deduce por documento — no hay un único
 TRADE_ROOT para todo.
 """
 
+import os
 import re
 from datetime import datetime, timezone
 from glob import glob
@@ -25,6 +26,14 @@ SOURCE = "ingest_docs"
 RE_THREAD = re.compile(r"thread\s+`([\w-]+)`")
 RE_DOC_REF = re.compile(r"[Vv]er\s+([\w./-]+\.md)")
 RE_FILE_REF = re.compile(r"`([\w./-]+\.(?:rs|py|md|json|toml|sh|sql|ts|tsx|js))`")
+
+# Raíces comunes donde un doc suele citar código, para la búsqueda por nombre
+# de archivo. Acotadas a propósito: antes cada cita entre backticks disparaba
+# un rglob suelto sobre todo el repo y el refresh explotaba en repos grandes.
+_BUSQUEDA_ROOTS = ("", "docs", "src")
+# Tope del caminado de respaldo (en directorios visitados): sin cap, un nombre
+# que no existe sigue recorriendo el repo entero.
+_RGLOB_MAX_DIRS = 2000
 
 
 def doc_id(path: Path) -> str:
@@ -43,11 +52,34 @@ def discover_docs() -> list[Path]:
     return found
 
 
+def _buscar_archivo(project_root: Path, rel_or_name: str) -> Path | None:
+    """Resolución acotada de una cita `archivo.py`: path directo, basename en
+    las raíces comunes y, de última instancia, un caminado del repo con tope
+    de directorios. Antes era `project_root.rglob(nombre)` suelto: en repos
+    grandes el refresh se iba de tiempo por cada cita que no resolvía el path
+    directo."""
+    name = Path(rel_or_name).name
+    for raiz in _BUSQUEDA_ROOTS:
+        base = project_root / raiz if raiz else project_root
+        directo = base / name
+        if directo.is_file():
+            return directo
+    visitados = 0
+    for dirpath, _dirnames, filenames in os.walk(project_root):
+        visitados += 1
+        if visitados > _RGLOB_MAX_DIRS:
+            return None
+        if name in filenames:
+            return Path(dirpath) / name
+    return None
+
+
 def file_id(code_index: CodeIndex, project_root: Path, rel_or_name: str) -> str:
     candidate = project_root / rel_or_name
     if not candidate.exists():
-        matches = list(project_root.rglob(rel_or_name))
-        candidate = matches[0] if matches else candidate
+        found = _buscar_archivo(project_root, rel_or_name)
+        if found is not None:
+            candidate = found
     resolved = code_index.resolve_file(str(candidate))
     if resolved:
         return resolved

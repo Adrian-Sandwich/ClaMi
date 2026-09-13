@@ -75,20 +75,32 @@ def chat(base_url: str, model: str, system: str, user: str, timeout_secs: int = 
     return data["choices"][0]["message"]["content"]
 
 
+def _persona(seat: str) -> str:
+    """Prompt de persona con fallback genérico: un asiento custom del registry
+    sin persona dedicada no puede quedar sin identidad."""
+    try:
+        return personas.system_prompt(seat)
+    except ValueError:
+        return f"Sos el asiento '{seat}' del sistema MAGI."
+
+
+def _history(journal: list[dict], vacio: str) -> str:
+    """Journal inlineado para el prompt: mismos campos para cada mensaje y
+    cuerpo acotado a BODY_CHARS."""
+    return "\n\n".join(
+        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:BODY_CHARS]}"
+        for m in journal
+    ) or vacio
+
+
 def build_api_prompt(seat: str, decision: dict, journal: list[dict],
                      memory: str | None = None) -> tuple[str, str]:
     """(system, user) para el modelo. La persona va al system con el contrato
     de respuesta; el contexto completo va al user. `memory` es el bloque
     opcional del grafo (decisiones previas, archivos tocados): contexto, no
     verdad."""
-    try:
-        persona = personas.system_prompt(seat)
-    except ValueError:
-        persona = f"Sos el asiento '{seat}' del sistema MAGI."
-    history = "\n\n".join(
-        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:BODY_CHARS]}"
-        for m in journal
-    ) or "(journal vacío)"
+    persona = _persona(seat)
+    history = _history(journal, "(journal vacío)")
     system = (
         f"{persona}\n\n"
         "Respondé SIEMPRE con esta estructura y nada fuera de ella:\n"
@@ -108,6 +120,36 @@ def build_api_prompt(seat: str, decision: dict, journal: list[dict],
         "si sus argumentos son mejores que los tuyos."
     )
     return system, user
+
+
+def build_inline_active_prompt(seat: str, decision: dict, journal: list[dict],
+                               memory: str | None, cwd: str) -> str:
+    """Prompt de decisión para una cabeza CLI-sin-MCP que SÍ tiene
+    herramientas (codex exec con sandbox, p.ej.). Mismo contrato de voto que
+    las demás, pero con capacidad de investigación simétrica a la cabeza MCP:
+    las personalidades sesgan el criterio, no las capacidades — si sólo una
+    cabeza puede mirar el repo, el consejo entero queda sesgado a lo que esa
+    cabeza ve."""
+    history = _history(journal, "(journal vacío)")
+    memoria_txt = f"\n\n{memory}" if memory else ""
+    return (
+        f"{_persona(seat)}\n\n"
+        f"Decisión #{decision['id']} (protocolo {decision['protocol']}, ronda {decision['round']}): {decision['title']}\n"
+        f"Artefacto sobre el que se decide: {decision.get('artifact') or '—'} "
+        f"(tu directorio de trabajo es {cwd})\n"
+        f"{memoria_txt}\n\n"
+        f"Journal del debate hasta ahora:\n{history}\n\n"
+        "Antes de votar, INVESTIGÁ con tus herramientas: leé los archivos del "
+        "repo que importen, corré comandos de SOLO LECTURA (git status/diff, "
+        "grep, tests si aplican). No modifiques nada.\n"
+        "Tu respuesta FINAL termina SIEMPRE con esta estructura y nada fuera "
+        "de ella después:\n"
+        "POSITION: yes|no|conditional|info\n"
+        "CONDITIONS: <condiciones separadas por ;> (sólo si position=conditional)\n"
+        "<tu razonamiento completo, citando lo que viste>\n\n"
+        "Votá desde tu eje, no desde el consenso esperado. Si es la ronda 2 o "
+        "más, revisá tu posición anterior a la luz de las otras cabezas."
+    )
 
 
 def run_turn(seat: dict, decision: dict, journal: list[dict],
@@ -132,14 +174,8 @@ def build_chat_prompt(seat: str, journal: list[dict]) -> tuple[str, str]:
     Mismo contrato que una cabeza CLI en un thread libre: un mensaje de
     conversación desde su eje. Sin tag POSITION acá — no hay nada que votar.
     """
-    try:
-        persona = personas.system_prompt(seat)
-    except ValueError:
-        persona = f"Sos el asiento '{seat}' del sistema MAGI."
-    history = "\n\n".join(
-        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:BODY_CHARS]}"
-        for m in journal
-    ) or "(conversación vacía)"
+    persona = _persona(seat)
+    history = _history(journal, "(conversación vacía)")
     system = (
         f"{persona}\n\n"
         "Estás en una conversación abierta con el operador humano y las otras "

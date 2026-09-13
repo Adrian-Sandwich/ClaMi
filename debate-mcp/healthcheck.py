@@ -193,7 +193,9 @@ def notify(title: str, body: str) -> None:
 
 
 def main() -> int:
-    notify = "--notify" in sys.argv
+    # `do_notify` y no `notify`: la variable local pisa la función del módulo
+    # y `notify(...)` explotaba con TypeError justo cuando un check fallaba.
+    do_notify = "--notify" in sys.argv
     quiet = "--quiet" in sys.argv
 
     results = []
@@ -212,7 +214,7 @@ def main() -> int:
         for name, status, detail in results:
             print(f"  {ICON[status]} {name:<13} {detail}")
 
-    if notify and worst != OK:
+    if do_notify and worst != OK:
         bad = [f"{n}: {d}" for n, s, d in results if s != OK]
         notify(f"ClaMi {worst.upper()}", " | ".join(bad)[:200])
 

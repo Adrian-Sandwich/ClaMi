@@ -17,6 +17,7 @@ canónicos. Ningún test toca el registry real del repo.
 """
 
 import json
+import os
 import sys
 import threading
 
@@ -498,7 +499,7 @@ def test_load_state_completa_un_estado_viejo(monkeypatch, tmp_path):
     monkeypatch.setattr(relay, "STATE_PATH", path)
 
     state = relay.load_state()
-    assert state == {"last_id": 42, "threads": {}, "pending": []}
+    assert state == {"last_id": 42, "threads": {}, "pending": [], "spawn_failures": {}}
 
 
 def test_heartbeat_reporta_los_threads_frenados(fired, tmp_path, monkeypatch):
@@ -590,7 +591,7 @@ def test_asiento_api_en_thread_libre_dispara_turno_api(fired, monkeypatch):
     ])
     api_calls = []
     monkeypatch.setattr(relay, "fire_api_chat_turn",
-                        lambda seat, thread, since_id: api_calls.append((seat["seat"], thread)) or True)
+                        lambda seat, thread: api_calls.append((seat["seat"], thread)) or True)
     relay.process_cycle(FakeConn([msg(1, author="adrian", kind="analisis")]), fresh_state())
     assert api_calls == [("melchior", "t")]
     assert fired == [], "el asiento API no pasa por el spawn CLI"
@@ -617,7 +618,7 @@ def test_turno_api_de_chat_publica_un_mensaje_respuesta(fired, monkeypatch):
                         lambda seat, journal: "sí, yo lo revisaría con calma")
 
     relay._run_api_chat_turn(
-        {"seat": "melchior", "model": "qwen", "base_url": "http://x/v1"}, "chat", 0,
+        {"seat": "melchior", "model": "qwen", "base_url": "http://x/v1"}, "chat",
     )
     assert inserted == {
         "thread": "chat", "author": "melchior",
@@ -770,3 +771,250 @@ def test_cabeza_inline_con_tools_investiga_antes_de_votar(fired_magi, monkeypatc
     del seat_pasivo["tools"]
     relay._run_cli_inline_turn(seat_pasivo, d, cwd, memory=None)
     assert "INVESTIGÁ con tus herramientas" not in prompts["balthasar"]
+
+
+# ------------------------------------------------- reintentos de disparo fallido
+
+class _Clock:
+    """Reloj monotónico controlado por el test: los backoff son exponenciales
+    y el estacionamiento llega al tope en segundos de reloj, no de pared."""
+
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def monotonic(self):
+        return self.now
+
+    def avanzar(self, secs):
+        self.now += secs
+
+
+class _InsertConn(FakeConn):
+    """FakeConn que además captura los INSERT del journal (aviso de
+    estacionamiento de un disparo)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.inserts = []
+
+    def execute(self, query, params=()):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO messages"):
+            self.inserts.append(params)
+            return _Result([])
+        return super().execute(query, params)
+
+
+def _spawn_que_no_arranca(monkeypatch):
+    """Popen que falla como un binario ausente: OSError, el caso que antes
+    reintentaba cada 2s para siempre."""
+    def _boom(*a, **kw):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(relay.subprocess, "Popen", _boom)
+
+
+def test_disparo_fallido_hace_backoff_y_al_final_estaciona(monkeypatch, tmp_path):
+    """Un binario ausente no puede reintentar cada 2s para siempre: el
+    reintento respeta el backoff y, tras MAX_SPAWN_ATTEMPTS fallos, se
+    estaciona con aviso en el journal."""
+    monkeypatch.setattr(relay, "STATE_PATH", tmp_path / "s.json")
+    monkeypatch.setattr(relay, "EVENTS_PATH", tmp_path / "e.jsonl")
+    relay._inflight.clear()
+    clock = _Clock()
+    monkeypatch.setattr(relay.time, "monotonic", clock.monotonic)
+    _patch_registry(monkeypatch, ["kimi", "claude"], bin="/fake/bin")
+    _spawn_que_no_arranca(monkeypatch)
+
+    state = fresh_state()
+    conn = _InsertConn([msg(1, author="kimi")])
+    relay.process_cycle(conn, state)
+
+    token = relay._token("t")
+    assert state["spawn_failures"][token]["count"] == 1
+    assert state["pending"][0]["retry_at"] > clock.now, "backoff antes de reintentar"
+    assert state["threads"]["t"]["triggers"] == 0, "un disparo fallido no gasta cupo"
+
+    # antes de que venza el backoff no se reintenta: pending se conserva
+    relay.process_cycle(conn, state)
+    assert state["spawn_failures"][token]["count"] == 1
+
+    intentos = 1
+    while state["spawn_failures"].get(token):
+        clock.avanzar(state["spawn_failures"][token]["retry_at"] - clock.now + 0.1)
+        relay.process_cycle(conn, state)
+        if state["spawn_failures"].get(token):
+            intentos += 1
+
+    assert intentos == relay.MAX_SPAWN_ATTEMPTS - 1, "parked en el último intento"
+    assert state["pending"] == [], "estacionado: nada queda pendiente"
+    assert len(conn.inserts) == 1, "un solo aviso en el journal"
+    thread, body = conn.inserts[0]
+    assert thread == "t"
+    assert "ESTACIONADO" in body and "claude" in body
+
+    # un mensaje nuevo reactiva los reintentos (conteo desde cero)
+    conn.messages.append(msg(2, author="kimi", kind="analisis"))
+    relay.process_cycle(conn, state)
+    assert state["spawn_failures"][token]["count"] == 1
+
+
+def test_turno_de_decision_fallido_respeta_el_backoff(monkeypatch, tmp_path):
+    """Los turnos de decisión se re-disparan desde fire_decision_turns en cada
+    ciclo (sin pasar por pending): el backoff tiene que frenar ese re-drive."""
+    monkeypatch.setattr(relay, "STATE_PATH", tmp_path / "s.json")
+    monkeypatch.setattr(relay, "EVENTS_PATH", tmp_path / "e.jsonl")
+    relay._inflight.clear()
+    clock = _Clock()
+    monkeypatch.setattr(relay.time, "monotonic", clock.monotonic)
+    _patch_registry(monkeypatch, ["melchior", "balthasar", "casper"], bin="/fake/bin")
+    _spawn_que_no_arranca(monkeypatch)
+
+    state = fresh_state()
+    conn = _InsertConn([], decisions=[mk_decision_row()])
+    relay.process_cycle(conn, state)
+
+    tokens = [relay._token("d-42", s) for s in ("melchior", "balthasar", "casper")]
+    assert all(state["spawn_failures"][t]["count"] == 1 for t in tokens)
+
+    # el ciclo siguiente no re-dispara nada: todos en backoff
+    relay.process_cycle(conn, state)
+    assert all(state["spawn_failures"][t]["count"] == 1 for t in tokens)
+
+    clock.avanzar(relay.SPAWN_BACKOFF_BASE_SECS + 0.1)
+    relay.process_cycle(conn, state)
+    assert all(state["spawn_failures"][t]["count"] == 2 for t in tokens)
+
+
+def test_ejecutor_con_binario_ausente_falla_rapido(monkeypatch, tmp_path):
+    """Un ejecutor cuyo binario no existe falla ANTES de tocar git (rama,
+    worktree) y con un mensaje claro, en vez de hot-loopar churn de git."""
+    monkeypatch.setattr(relay, "EVENTS_PATH", tmp_path / "e.jsonl")
+    monkeypatch.setattr(heads, "load", lambda: [
+        {"seat": "ejec", "name": "x", "type": "cli", "executor": True,
+         "bin": str(tmp_path / "no-existe")},
+    ])
+    plan_llamado = []
+    monkeypatch.setattr(relay.production, "plan",
+                        lambda *a, **kw: plan_llamado.append(a))
+    fallos = []
+    monkeypatch.setattr(relay, "_execution_failed",
+                        lambda d, detail: fallos.append(detail))
+
+    relay._execute_plan({"id": 7, "thread": "d7", "title": "plan X"}, str(tmp_path))
+
+    assert plan_llamado == [], "no tiene que crear rama ni worktree"
+    assert len(fallos) == 1 and "no existe" in fallos[0]
+
+
+# ------------------------------------------------- logs y eventos acotados
+
+def test_eventos_se_rotan_al_pasar_el_cap(monkeypatch, tmp_path):
+    """El JSONL de eventos es append-only: al pasar el cap, el viejo pasa a
+    .1 (una generación) y el nuevo arranca limpio."""
+    events = tmp_path / "events.jsonl"
+    events.write_text("x" * 500)
+    monkeypatch.setattr(relay, "EVENTS_PATH", events)
+    monkeypatch.setattr(relay, "EVENTS_MAX_BYTES", 100)
+
+    relay.event("prueba", dato=1)
+
+    assert events.exists()
+    lineas = events.read_text().strip().splitlines()
+    assert len(lineas) == 1 and json.loads(lineas[0])["event"] == "prueba"
+    viejo = tmp_path / "events.jsonl.1"
+    assert viejo.exists() and len(viejo.read_text()) == 500
+
+
+def test_prune_trigger_logs_mantiene_los_ultimos_n(monkeypatch, tmp_path):
+    """Un log por disparo, rotados: se conservan los últimos MAX_LOGS_PER_TRIGGER
+    del prefijo; el resto se borra."""
+    monkeypatch.setattr(relay, "LOG_DIR", tmp_path)
+    for i in range(relay.MAX_LOGS_PER_TRIGGER + 5):
+        p = tmp_path / f"t_kimi_20260101T000000_{i:03d}.log"
+        p.write_text("log")
+        os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))
+    # otro asiento del mismo thread no se toca
+    otro = tmp_path / "t_claude_20260101T000000_000.log"
+    otro.write_text("log")
+
+    relay._prune_trigger_logs("t_kimi_")
+
+    vivos = sorted(p.name for p in tmp_path.glob("t_kimi_*.log"))
+    assert len(vivos) == relay.MAX_LOGS_PER_TRIGGER
+    assert vivos[-1].endswith("_014.log"), "sobreviven los más nuevos"
+    assert otro.exists()
+
+
+def test_nombre_de_log_con_milisegundos_no_colisiona(monkeypatch, tmp_path):
+    """Dos disparos del mismo asiento en el mismo segundo tenían el mismo
+    nombre de archivo (resolución de 1s) y el segundo pisaba al primero."""
+    from datetime import datetime as _dt
+
+    monkeypatch.setattr(relay, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(relay, "EVENTS_PATH", tmp_path / "e.jsonl")
+
+    class _MsClock:
+        ms = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.ms += 1
+            return _dt(2026, 1, 1, 0, 0, 0, cls.ms * 1000, tzinfo=tz)
+
+    monkeypatch.setattr(relay, "datetime", _MsClock)
+
+    class _Proc:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(relay.subprocess, "Popen", lambda *a, **kw: _Proc())
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    _patch_registry(monkeypatch, ["kimi", "claude"], bin="/fake/bin")
+
+    assert relay.trigger("claude", "t", 0, str(tmp_path), "prompt")
+    assert relay.trigger("claude", "t", 1, str(tmp_path), "prompt")
+    assert len(list(tmp_path.glob("t_claude_*.log"))) == 2
+
+
+# ------------------------------------------------- conexión durante el chat API
+
+def test_turno_api_suelta_la_conexion_mientras_chatea(monkeypatch, tmp_path):
+    """Regresión: _run_api_turn retenía la conexión de Postgres durante todo
+    el chat (hasta 10 min por default). El journal se lee, la conexión se
+    cierra, y el voto se registra en una conexión nueva."""
+    monkeypatch.setattr(relay, "EVENTS_PATH", tmp_path / "e.jsonl")
+
+    class _TrackedConn(FakeConn):
+        abiertas = 0
+        abiertas_durante_chat = None
+
+        def __init__(self, *a, **kw):
+            super().__init__([])
+
+        def __enter__(self):
+            type(self).abiertas += 1
+            return self
+
+        def __exit__(self, *a):
+            type(self).abiertas -= 1
+            return False
+
+    def fake_run_turn(seat, d, journal, memory=None):
+        _TrackedConn.abiertas_durante_chat = _TrackedConn.abiertas
+        return {"position": "yes", "conditions": None, "body": "ok"}
+
+    monkeypatch.setattr(relay.apihead, "run_turn", fake_run_turn)
+    monkeypatch.setattr(relay.board, "record_position",
+                        lambda *a, **kw: ({"action": "wait"}, 1))
+    monkeypatch.setattr(relay, "connect", _TrackedConn)
+
+    relay._run_api_turn(
+        {"seat": "melchior", "type": "api", "model": "qwen", "base_url": "http://x/v1"},
+        mk_decision_row(),
+    )
+
+    assert _TrackedConn.abiertas_durante_chat == 0, "chat sin conexión tomada"
+    assert _TrackedConn.abiertas == 0

@@ -125,7 +125,6 @@ body {
 
 .magi>.system-status {
     grid-area: status;
-    font-family: 'Helvetica';
     font-family: 'Lucida Console';
     color: #ff8d00;
 }
@@ -244,7 +243,6 @@ body {
 .modal {
     border: 2px solid #ff8d00;
     color: #ff8d00;
-    font-family: 'Helvetica';
     font-family: 'Lucida Console';
     position: absolute;
     background: black;
@@ -278,23 +276,6 @@ body {
     padding: 10px;
 }
 
-.input-container {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    color: #ff8d00;
-    font-family: 'Helvetica';
-    font-family: 'Lucida Console';
-    column-gap: 10px;
-    row-gap: 5px;
-    margin-top: 15px;
-}
-
-.input-container>input {
-    background: #1f1203;
-    border: 2px solid #ff8d00;
-    color: #ff8d00;
-}
-
 /* ---------------------------------------------------------- ClaMi additions
  * (status bar, conversación, composer estilo CLI, thinking) — el bloque de
  * arriba conserva verbatim el CSS de TomaszRewak/MAGI. */
@@ -318,11 +299,6 @@ body {
     margin-top: 10px;
     font-family: 'Lucida Console', monospace;
     font-size: 13px;
-}
-
-#conversation .empty {
-    color: #7a5a2e;
-    padding: 12px 2px;
 }
 
 #conversation .msg {
@@ -403,28 +379,6 @@ body {
     color: black;
 }
 
-.composer .modes button#c-abort {
-    margin-left: auto;
-    border-color: #a41413;
-    color: #a41413;
-    background: black;
-}
-
-.composer .modes button#c-abort:hover {
-    background: #a41413;
-    color: black;
-}
-
-.composer .modes button#c-new {
-    border-color: #52e691;
-    color: #52e691;
-}
-
-.composer .modes button#c-new:hover {
-    background: #52e691;
-    color: black;
-}
-
 .composer textarea {
     width: 100%;
     box-sizing: border-box;
@@ -468,16 +422,6 @@ body {
     font-family: 'Lucida Console', monospace;
     font-size: 11px;
     padding: 4px 8px;
-}
-
-.composer .prod-help {
-    color: #7a5a2e;
-    font-size: 10px;
-    flex: 2;
-}
-
-.composer .prod-help code {
-    color: #ff8d00;
 }
 
 .composer .composer-opts #c-browse {
@@ -605,19 +549,6 @@ body {
     opacity: 0.75;
 }
 
-.composer .prod-toggle {
-    color: #7a5a2e;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    white-space: nowrap;
-    cursor: pointer;
-}
-
-.composer .prod-toggle input:checked + span {
-    color: #ff8d00;
-}
-
 #history {
     margin-top: 18px;
     font-family: 'Lucida Console', monospace;
@@ -673,7 +604,7 @@ dialog::backdrop { background: #000b; }
 .modal .modal-body { overflow-wrap: anywhere; }
 .flicker { animation: operator-pulse 2.5s ease-in-out infinite; }
 @keyframes operator-pulse { 50% { opacity: .65; } }
-@media (prefers-reduced-motion: reduce) { .flicker { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .flicker, .thinking-line, .thinking-tag { animation: none; } }
 @media (max-width: 600px) {
   body { margin: 5px; }
   .system { padding: 10px; }

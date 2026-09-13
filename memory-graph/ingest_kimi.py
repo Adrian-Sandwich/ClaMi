@@ -14,6 +14,7 @@ contra los logs reales y falla si un evento desaparece — en vez de en un
 comentario que nadie revalida."""
 
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +31,15 @@ SESSIONS_DIR = KIMI_HOME / "sessions"
 
 
 def load_workspaces() -> dict:
-    data = json.loads((KIMI_HOME / "workspaces.json").read_text(encoding="utf-8"))
+    """El mapa slug→root del workspace. Sin el archivo (kimi-code nunca corrió
+    acá, p.ej.) degrade a un mapa vacío con aviso: refresh.sh corre con
+    `set -euo pipefail` y un FileNotFoundError acá tumba la re-ingesta entera
+    antes de que corran los demás ingestores."""
+    try:
+        data = json.loads((KIMI_HOME / "workspaces.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[ingest_kimi] workspaces.json ilegible ({exc}); asumo sin workspaces", file=sys.stderr)
+        return {}
     return {slug: w["root"] for slug, w in data.get("workspaces", {}).items()}
 
 

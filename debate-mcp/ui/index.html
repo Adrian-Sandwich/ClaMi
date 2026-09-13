@@ -40,7 +40,7 @@
       <div class="composer-opts">
         <label for="c-repo">Repository</label>
         <input id="c-repo" placeholder="repo folder (optional — pick or type)">
-        <button id="c-browse" title="browse folders">📂</button>
+        <button id="c-browse" title="browse folders" aria-label="browse folders">📂</button>
       </div>
       <p id="repo-help">Optional: an approved plan will be implemented, reviewed and merged in this repository.</p>
       <div class="fs-panel" id="fs-panel" hidden>
@@ -65,6 +65,7 @@
       <div class="modal-body"><div id="modal-content"></div></div>
     </dialog>
   </div>
+  <script>window.MAGI_TOKEN = "__MAGI_TOKEN__";</script>
   <script src="/sound.js"></script>
   <script src="/app.js"></script>
 </body>

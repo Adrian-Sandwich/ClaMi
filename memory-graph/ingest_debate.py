@@ -83,7 +83,9 @@ def write_decision(conn, r: dict, now: str) -> None:
 def main() -> None:
     now = datetime.now(timezone.utc).isoformat()
     conn = db.connect()
-    with psycopg.connect(CONNINFO, row_factory=dict_row) as pg:
+    # connect_timeout acotado: sin él, un Postgres caído cuelga refresh.sh
+    # ~2 minutos por corrida (mismo criterio que debate-mcp/config.py).
+    with psycopg.connect(CONNINFO, row_factory=dict_row, connect_timeout=10) as pg:
         rows = pg.execute(
             """
             WITH kc AS (
