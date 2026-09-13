@@ -48,37 +48,14 @@ const MagiSound = (() => {
     tone({f, at, dur, type: 'square', level, attack: .003, detune: -11});
     tone({f: f * 1.618, at, dur: dur * .72, type: 'triangle', level: level * .55, attack: .002, detune: 7});
   }
-  function radio({at = 0, dur = .08, level = .28}) {
-    const frames = Math.max(1, Math.floor(context.sampleRate * dur));
-    const buffer = context.createBuffer(1, frames, context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < frames; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
-    const source = context.createBufferSource();
-    const filter = context.createBiquadFilter(), gain = context.createGain();
-    const t0 = context.currentTime + at;
-    filter.type = 'bandpass'; filter.frequency.value = 2400; filter.Q.value = .8;
-    gain.gain.setValueAtTime(volume * level, t0);
-    gain.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
-    source.buffer = buffer; source.connect(filter); filter.connect(gain); gain.connect(context.destination);
-    voices.add(source);
-    source.onended = () => { voices.delete(source); source.disconnect(); filter.disconnect(); gain.disconnect(); };
-    source.start(t0); source.stop(t0 + dur + .01);
-  }
   const cues = {
-    boot() {
-      radio({dur: .12, level: .18});
-      tone({f: 180, to: 540, dur: .24, type: 'sawtooth', level: .38, attack: .015});
-      tone({f: 720, to: 360, at: .18, dur: .22, type: 'square', level: .28, attack: .006});
-    },
     // Envío: dos blips secos de consola, como teclear en la terminal MAGI.
     send() {
-      radio({dur: .045, level: .18});
       metallic({f: 740, dur: .07, level: .42});
       tone({f: 1480, to: 620, at: .075, dur: .12, type: 'square', level: .34, attack: .004});
     },
     // Voto: una campana medida, una sola nota con coro.
     vote() {
-      radio({dur: .035, level: .14});
       metallic({f: 392, dur: .1, level: .45});
       pad(587.33, {at: .04, dur: .42, type: 'triangle', level: .62, attack: .006});
     },
@@ -92,12 +69,10 @@ const MagiSound = (() => {
     // Alerta: drone grave sostenido y llamado de trompa en segunda menor,
     // dos veces. Es el "algo se trabó / falló la ejecución" de NERV.
     attention() {
-      radio({dur: .16, level: .24});
-      tone({f: 49, to: 62, dur: 2.1, type: 'sawtooth', level: .7, attack: .22});
-      tone({f: 50.5, to: 63.5, dur: 2.1, type: 'sawtooth', level: .45, attack: .25});
-      pad(220, {to: 185, at: .12, dur: .78, type: 'triangle', level: .8, attack: .08});
-      pad(220, {to: 185, at: 1.02, dur: .78, type: 'triangle', level: .8, attack: .08});
-      radio({at: .18, dur: .08, level: .18}); radio({at: 1.08, dur: .08, level: .18});
+      tone({f: 55, dur: 1.5, type: 'sawtooth', level: .8, attack: .25});
+      tone({f: 56.7, dur: 1.5, type: 'sawtooth', level: .55, attack: .3});
+      pad(220, {to: 233.08, at: .1, dur: 1.0, type: 'triangle', level: .85, attack: .18});
+      pad(220, {to: 233.08, at: 1.15, dur: 1.1, type: 'triangle', level: .85, attack: .18});
     },
   };
   function play(kind) {

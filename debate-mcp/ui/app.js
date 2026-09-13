@@ -604,7 +604,7 @@ function syncSound() {
 }
 soundToggle.addEventListener("click", async () => {
   MagiSound.setEnabled(!MagiSound.enabled); syncSound();
-  await MagiSound.unlock(); MagiSound.play("boot");
+  await MagiSound.unlock(); MagiSound.play("send");
 });
 document.getElementById("sound-volume").addEventListener("input", event => MagiSound.setVolume(Number(event.target.value) / 100));
 document.addEventListener("pointerdown", () => MagiSound.unlock());
