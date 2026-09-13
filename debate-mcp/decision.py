@@ -182,7 +182,9 @@ def build_head_prompt(seat: str, persona: str, decision: dict, since_id: int,
         )
     else:
         lines.append(
-            "2. Investigá el artefacto con tus herramientas (Read/Grep/Glob) antes de votar."
+            "2. Investigá el artefacto con tus herramientas (Read/Grep/Glob) antes de votar — "
+            "con criterio: el journal ya trae el contexto del debate, así que andá a lo que sólo "
+            "vos podés ver (correr tests, leer archivos clave). Evitá loops de lectura."
         )
     lines.append(
         f"3. Publicá tu análisis y votá: cast_position(decision_id={d['id']}, "

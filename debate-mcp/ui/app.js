@@ -190,16 +190,33 @@ function renderIntent(d) {
   } else if (d.status === "open") {
     txt = `↳ Enter adds CONTEXT to #${d.id} — the heads read it on their next turn (${d.round}° round).`;
   } else if (d.status === "split") {
-    txt = `↳ Enter closes #${d.id} with YOUR ruling — o escribí "seguí" para otra ronda.`;
+    const pos = (d.seats ?? []).filter(s => s.voted).map(s => s.position);
+    const faltaInfo = pos.includes("info");
+    txt = faltaInfo
+      ? `↳ #${d.id} no es un desacuerdo: el consejo te pidió información. Escribí "seguí" + el contexto que falta, o tu ruling para cerrar igual.`
+      : `↳ Enter closes #${d.id} with YOUR ruling — o escribí "seguí" para otra ronda.`;
   } else if (d.status === "executing") {
     txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
   } else {
     txt = "↳ Enter opens a NEW decision — this one is already closed (see HISTORY below).";
   }
   el.textContent = txt;
-  // acciones accionables para el STALEMATE: no dejar la decisión en "y ahora qué"
+  // acciones del STALEMATE: distinguir "desacuerdo real" de "falta info".
+  // Con info en la mezcla no hubo choque de criterio: las cabezas pidieron
+  // datos; la acción natural es dar contexto, no arbitrar.
   const sa = document.getElementById("stalemate-actions");
-  sa.hidden = !(uiMode === "council" && d && d.status === "split");
+  const esSplit = uiMode === "council" && d && d.status === "split";
+  sa.hidden = !esSplit;
+  if (esSplit) {
+    const pos = (d.seats ?? []).filter(s => s.voted).map(s => s.position);
+    const faltaInfo = pos.includes("info");
+    sa.querySelector("span").textContent = faltaInfo
+      ? "the council lacks information — they asked you:"
+      : "the council disagrees — it's your call:";
+    document.getElementById("sa-segui").textContent = faltaInfo
+      ? "seguí — answer with context"
+      : "seguí";
+  }
 }
 
 function render() {
@@ -228,11 +245,14 @@ document.getElementById("c-new").addEventListener("click", async () => {
   await send(true);
 });
 
-// --- acciones de STALEMATE: botones en vez de recordar la convención
-document.getElementById("sa-segui").addEventListener("click", async () => {
+// --- acciones de STALEMATE: botones en vez de recordar la convención.
+// "seguí" prefija la caja (podés agregar contexto o mandarlo solo con Enter):
+// enseña la convención en vez de ejecutarla a escondidas.
+document.getElementById("sa-segui").addEventListener("click", () => {
   const input = document.getElementById("c-input");
-  input.value = "seguí";
-  await send();
+  input.value = "seguí ";
+  input.placeholder = "add the context the council asked for — or send bare 'seguí' for another round";
+  input.focus();
 });
 document.getElementById("sa-ruling").addEventListener("click", () => {
   const input = document.getElementById("c-input");
