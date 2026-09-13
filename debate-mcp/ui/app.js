@@ -156,6 +156,63 @@ function renderStatusBar(d) {
   el.textContent = `#${d.id} ${d.badge.text}${conf} — ${d.title}`;
 }
 
+function verdictText(d) {
+  if (!d) return "No decision selected";
+  if (d.status === "open") return "The council is still deliberating";
+  if (d.status === "split") return "The council needs your decision";
+  if (d.status === "executing") return d.execution_state === "failed"
+    ? "The approved plan needs attention" : "The approved plan is in execution";
+  return ({yes: "Approved", no: "Rejected", conditional: "Approved with conditions"}[d.ruling] || d.badge.text);
+}
+
+function shortReason(body) {
+  const clean = String(body || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "No position recorded yet.";
+  const sentence = clean.match(/^(.{1,180}?[.!?])(?:\s|$)/)?.[1] || clean.slice(0, 180);
+  return sentence.length < clean.length ? `${sentence}…` : sentence;
+}
+
+function renderSummary(d) {
+  const card = document.getElementById("summary-card");
+  const title = document.getElementById("summary-title");
+  const lead = document.getElementById("summary-lead");
+  const meta = document.getElementById("summary-meta");
+  const conditions = document.getElementById("summary-conditions");
+  const seats = document.getElementById("summary-seats");
+  if (!d) {
+    card.classList.add("empty"); title.textContent = "No decision selected";
+    lead.textContent = "Ask a question to get a readable conclusion from all three heads.";
+    meta.textContent = ""; conditions.hidden = true; seats.innerHTML = ""; return;
+  }
+  card.classList.remove("empty");
+  title.textContent = verdictText(d);
+  const voted = (d.seats || []).filter(s => s.voted);
+  const counts = voted.reduce((out, s) => { out[s.position] = (out[s.position] || 0) + 1; return out; }, {});
+  const voteLine = voted.length ? Object.entries(counts).map(([position, count]) => `${count} ${position}`).join(" · ") : "No votes yet";
+  const confidence = d.confidence == null ? "confidence pending" : `${Math.round(Number(d.confidence) * 100)}% confidence`;
+  meta.textContent = `${voteLine}  ·  ${confidence}  ·  round ${d.round}`;
+  lead.textContent = d.status === "open"
+    ? `${voted.length} of ${(d.seats || []).length} heads have answered. The synthesis will settle when the round closes.`
+    : d.status === "split" ? "The perspectives do not converge. Read the three reasons below, then choose how to continue."
+    : d.ruling === "info" ? "The council classified this as an open question, not an approve/reject decision. The useful answer is below; the raw journal is optional."
+    : "This is the council’s combined outcome. Open a head below only when you need the detailed reasoning.";
+  const allConditions = [...new Set((d.seats || []).flatMap(s => s.conditions || []))];
+  conditions.hidden = !allConditions.length;
+  conditions.innerHTML = allConditions.length
+    ? `<strong>Conditions:</strong> ${allConditions.map(esc).join(" · ")}` : "";
+  seats.innerHTML = (d.seats || []).map(s => {
+    const color = safeColor(SEAT_COLORS[s.seat] || "#d8d8d8");
+    const position = s.voted ? String(s.position).toUpperCase() : "THINKING";
+    return `<button class="summary-seat" data-seat="${esc(s.seat)}" style="--seat-color:${color}" aria-label="Read ${esc(s.seat)} reasoning">
+      <span class="summary-seat-name">${esc(s.seat.toUpperCase())}</span><span class="summary-seat-vote">${esc(position)}</span>
+      <span class="summary-seat-body">${esc(shortReason(s.body))}</span></button>`;
+  }).join("");
+  seats.querySelectorAll(".summary-seat").forEach(button => {
+    const seat = (d.seats || []).find(s => s.seat === button.dataset.seat);
+    button.addEventListener("click", () => openModal(seat));
+  });
+}
+
 function renderConversation(d) {
   const el = document.getElementById("conversation");
   const input = document.getElementById("c-input");
@@ -289,6 +346,7 @@ function render() {
   }
   renderMagi(d);
   renderStatusBar(d);
+  renderSummary(d);
   renderConversation(d);
   renderHistory();
   renderIntent(d);

@@ -544,6 +544,29 @@ body {
     color: #ff8d00;
 }
 
+.summary-card {
+    border: 2px solid #ff8d00;
+    background: linear-gradient(135deg, #160d03, #080604 65%);
+    padding: 16px 18px;
+    margin: 8px 0 14px;
+}
+.summary-card.empty { border-color: #69451f; }
+.summary-heading { display: flex; justify-content: space-between; gap: 12px; color: #ff8d00; font-size: 11px; letter-spacing: .12em; }
+.summary-card h2 { color: #ffe0ae; font-family: 'Lucida Console', monospace; font-size: clamp(19px, 3vw, 30px); line-height: 1.2; margin: 10px 0 7px; }
+.summary-lead { color: #e6d3b7; line-height: 1.55; margin: 0 0 10px; max-width: 78ch; }
+.summary-meta { color: #ffb454; font-size: 12px; letter-spacing: .04em; }
+.summary-conditions { border-left: 3px solid #52e691; color: #bfe9ca; line-height: 1.5; margin-top: 12px; padding: 7px 10px; }
+.summary-seats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.summary-seat { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; min-width: 0; border: 1px solid color-mix(in srgb, var(--seat-color) 70%, #6b451f); border-left: 4px solid var(--seat-color); background: #080604; padding: 9px 10px; text-align: left; }
+.summary-seat-name { color: var(--seat-color); font-size: 11px; letter-spacing: .08em; }
+.summary-seat-vote { color: #f2dfc5; font-size: 10px; }
+.summary-seat-body { grid-column: 1 / -1; color: #cbb99f; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.detail-panel { margin: 0 0 16px; border: 1px solid #4a341c; }
+.detail-panel > summary { cursor: pointer; color: #ffb454; padding: 10px 12px; font-size: 12px; list-style-position: inside; }
+.detail-panel > summary span { color: #917653; margin-left: 8px; font-size: 10px; }
+.detail-panel[open] > summary { border-bottom: 1px solid #4a341c; }
+.detail-panel #conversation { border: 0; margin: 0; }
+
 #history a .h-title {
     color: inherit;
     opacity: 0.75;
@@ -615,4 +638,7 @@ dialog::backdrop { background: #000b; }
   .composer .composer-opts { flex-wrap: wrap; }
   .composer .composer-opts label { width: 100%; }
   .modal>.modal-body { font-size: 14px; }
+  .summary-seats { grid-template-columns: 1fr; }
+  .summary-card { padding: 13px; }
+  .detail-panel > summary span { display: block; margin: 5px 0 0 20px; }
 }

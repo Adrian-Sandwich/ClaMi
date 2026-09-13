@@ -20,7 +20,19 @@
 
     <div class="statusbar" id="statusbar">MAGI SYSTEM</div>
 
-    <div id="conversation"></div>
+    <section class="summary-card" id="summary-card" aria-labelledby="summary-title">
+      <div class="summary-heading"><span class="eyebrow">COUNCIL SYNTHESIS</span><span id="summary-round"></span></div>
+      <h2 id="summary-title">No decision selected</h2>
+      <p class="summary-lead" id="summary-lead">Ask a question to get a readable conclusion from all three heads.</p>
+      <div class="summary-meta" id="summary-meta"></div>
+      <div class="summary-conditions" id="summary-conditions" hidden></div>
+      <div class="summary-seats" id="summary-seats"></div>
+    </section>
+
+    <details class="detail-panel" id="detail-panel">
+      <summary>Detailed reasoning <span>open only when you need the full journal</span></summary>
+      <div id="conversation"></div>
+    </details>
 
     <div class="composer">
       <div class="modes" id="modes">

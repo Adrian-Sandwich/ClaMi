@@ -50,6 +50,9 @@ def test_composer_targets_actions_and_preserves_failed_drafts(page):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     feed(page, snapshot("split"))
+    assert page.locator("#summary-card").is_visible()
+    assert page.locator("#detail-panel").get_attribute("open") is None
+    assert page.locator("#summary-title").inner_text() == "The council needs your decision"
     page.locator("#c-input").fill("Keep this context")
     page.locator("#sa-ruling").click()
     assert page.locator("#c-send").inner_text() == "Close with my ruling"
