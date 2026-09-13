@@ -7,6 +7,7 @@ tools MCP (server.py) como la UI (magi_ui.py) y los turnos de asientos API:
 una decisión es una decisión venga de donde venga.
 """
 
+import re
 import uuid
 
 from psycopg.types.json import Json
@@ -161,25 +162,63 @@ def record_position(
             """,
             (d["thread"], decision.resultado_text(d, act)),
         )
+    if act["action"] == "split":
+        # Destrabe: el split no es un callejón sin salida. El consejo le
+        # pide al operador una decisión concreta, con las dos vías: ruling
+        # humano (arbitraje) o "seguí" para otra ronda con su contexto
+        # (human_message reabre la decisión). Sin esto, el stalemate era
+        # invisible hasta que el operador se diera cuenta solo.
+        conn.execute(
+            """
+            INSERT INTO messages (thread, author, kind, body, artifact)
+            VALUES (%s, 'magi', 'consulta', %s, NULL)
+            """,
+            (d["thread"], consulta_destrabe_texto(d["round"], act["minority"])),
+        )
     return act, msg["id"]
+
+
+# Palabras que reabren una decisión en STALEMATE en vez de arbitrarla.
+# El resto del texto va como contexto para la ronda nueva.
+_RE_SEGUI = re.compile(r"^\s*(segu[ií]|continu[aá]|seguimos|retry|reintent[aá]|otra ronda)\b", re.IGNORECASE)
+
+
+def consulta_destrabe_texto(round_: int, posiciones: list[dict]) -> str:
+    """El mensaje que le pide al operador una decisión concreta cuando el
+    consejo no se puso de acuerdo: qué dijo cada cabeza y las dos vías."""
+    pos = "; ".join(
+        f"{m['head']}={m['position']}"
+        + (f" ({', '.join(m['conditions'])})" if m.get("conditions") else "")
+        for m in posiciones
+    )
+    return (
+        f"CONSULTA AL OPERADOR — el consejo no se puso de acuerdo tras "
+        f"{round_} ronda(s). Posiciones: {pos}.\n"
+        f"Respondé con tu ruling y justificación para cerrar la decisión, "
+        f"o escribí 'seguí' (opcionalmente con contexto nuevo) para abrir "
+        f"otra ronda: las cabezas recastan teniéndolo en cuenta."
+    )
 
 
 def human_message(conn, thread: str, body: str) -> dict:
     """Mensaje del operador humano desde la UI: un solo campo de texto, y el
     kind lo decide el estado del thread — cero protocolo que memorizar.
 
-    - decisión 'split'   → 'arbitraje': cierra la decisión, el ruling humano
-      queda en el body (misma lógica que el tool post_message);
+    - decisión 'split'   → dos vías: si el texto empieza con "seguí"/"retry",
+      REABRE la decisión (ronda siguiente, tu texto va como contexto y las
+      cabezas recastan); si no, es 'arbitraje': cierra con tu ruling;
     - decisión 'open'    → 'contexto': las cabezas lo leen en el journal de
-      su próximo turno (prompt desde el anchor, lo ven completo);
+      su próximo turno;
     - thread libre       → 'analisis': abre ronda y el relay dispara a la
       primera cabeza (los mensajes de adrian con otros kinds no disparan).
     """
     d = conn.execute(
-        "SELECT id, status FROM decisions WHERE thread = %s", (thread,)
+        "SELECT id, status, round FROM decisions WHERE thread = %s", (thread,)
     ).fetchone()
-    if d is not None and d["status"] == "split":
+    if d is not None and d["status"] == "split" and not _RE_SEGUI.match(body):
         kind = "arbitraje"
+    elif d is not None and d["status"] == "split":
+        kind = "contexto"
     elif d is not None:
         kind = "contexto"
     else:
@@ -193,6 +232,7 @@ def human_message(conn, thread: str, body: str) -> dict:
         (thread, kind, body),
     ).fetchone()
     arbitrated = None
+    reopened = None
     if kind == "arbitraje":
         closed = conn.execute(
             """
@@ -203,4 +243,14 @@ def human_message(conn, thread: str, body: str) -> dict:
             (thread,),
         ).fetchone()
         arbitrated = closed["id"] if closed else None
-    return {"id": row["id"], "kind": kind, "arbitrated_decision": arbitrated}
+    elif kind == "contexto" and d is not None and d["status"] == "split":
+        # destrabe: nueva ronda, las cabezas recastan con el contexto nuevo
+        conn.execute(
+            "UPDATE decisions SET status = 'open', round = %s WHERE id = %s",
+            (d["round"] + 1, d["id"]),
+        )
+        reopened = d["id"]
+    return {
+        "id": row["id"], "kind": kind,
+        "arbitrated_decision": arbitrated, "reopened_decision": reopened,
+    }

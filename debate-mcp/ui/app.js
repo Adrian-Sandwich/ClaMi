@@ -118,11 +118,18 @@ function renderStatusBar(d) {
 
 function renderConversation(d) {
   const el = document.getElementById("conversation");
+  const input = document.getElementById("c-input");
   let msgs = [];
   if (uiMode === "chat") {
     msgs = state?.chat ?? [];
+    input.placeholder = "Talk to the three heads — Enter to send";
   } else if (d) {
     msgs = d.journal ?? [];
+    input.placeholder = d.status === "split"
+      ? "STALEMATE — your ruling closes it, or write 'seguí' (+ context) for another round"
+      : "Ask the council anything… Enter to send, Shift+Enter for a new line";
+  } else {
+    input.placeholder = "Ask the council anything… Enter to send, Shift+Enter for a new line";
   }
   if (!msgs.length) {
     el.innerHTML = `<div class="empty">the council awaits — ask anything below</div>`;
@@ -212,6 +219,8 @@ async function send() {
     if (data.action === "opened") {
       focusedId = data.decision_id;
       status.textContent = `decision #${data.decision_id} opened — the council is deliberating`;
+    } else if (data.action === "reopened") {
+      status.textContent = `decision #${data.decision_id} reopened — the heads recast with your context`;
     } else if (data.action === "arbitrated") {
       status.textContent = `decision #${data.decision_id} closed with your ruling`;
     } else if (data.action === "context") {

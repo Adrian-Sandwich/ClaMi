@@ -64,9 +64,9 @@ COLORS = {
 }
 
 # En el journal de una decisión, la conversación son las posiciones con su
-# razonamiento, los contextos del operador y el cierre — no el título (ya es
-# el encabezado) ni la mecánica interna de rounds.
-CONVERSATION_KINDS = ("posicion", "resultado", "arbitraje", "contexto")
+# razonamiento, los contextos del operador, la consulta de destrabe y el
+# cierre — no el título (ya es el encabezado) ni la mecánica interna.
+CONVERSATION_KINDS = ("posicion", "resultado", "arbitraje", "contexto", "consulta")
 
 CLIENTS: list[queue.Queue] = []
 CLIENTS_LOCK = threading.Lock()
@@ -348,7 +348,11 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as conn:
                     with conn.transaction():
                         result = board.human_message(conn, thread, body)
-                self._send_json({**result, "action": result["kind"]}, 201)
+                if result.get("reopened_decision"):
+                    result = {**result, "decision_id": result["reopened_decision"], "action": "reopened"}
+                else:
+                    result = {**result, "action": result["kind"]}
+                self._send_json(result, 201)
                 return
             # council: el sistema elige el destino por estado
             with connect() as conn:
@@ -368,13 +372,19 @@ class Handler(BaseHTTPRequestHandler):
                         result = {**result, "kind": "decision", "action": "opened"}
                     else:
                         result = board.human_message(conn, d["thread"], body)
-                        result = {
-                            **result, "decision_id": d["id"], "kind": "decision",
-                            "action": {
-                                "arbitraje": "arbitrated",
-                                "contexto": "context",
-                            }.get(result["kind"], result["kind"]),
-                        }
+                        if result.get("reopened_decision"):
+                            result = {
+                                **result, "decision_id": result["reopened_decision"],
+                                "kind": "decision", "action": "reopened",
+                            }
+                        else:
+                            result = {
+                                **result, "decision_id": d["id"], "kind": "decision",
+                                "action": {
+                                    "arbitraje": "arbitrated",
+                                    "contexto": "context",
+                                }.get(result["kind"], result["kind"]),
+                            }
             self._send_json(result, 201)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, 400)

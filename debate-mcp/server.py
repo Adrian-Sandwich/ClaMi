@@ -31,7 +31,7 @@ import board
 
 from config import connect
 
-KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje", "posicion", "resultado", "contexto"}
+KINDS = {"analisis", "critica", "respuesta", "veredicto", "arbitraje", "posicion", "resultado", "contexto", "consulta"}
 
 # tope del long-poll: no tiene sentido esperar más que esto en una sola llamada
 MAX_WAIT_SECS = 300

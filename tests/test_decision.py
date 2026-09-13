@@ -295,8 +295,8 @@ class _HMConn:
 
     def execute(self, query, params=()):
         q = " ".join(query.split())
-        if q.startswith("SELECT id, status FROM decisions"):
-            rows = [{"id": 7, "status": self.decision_status}] if self.decision_status else []
+        if q.startswith("SELECT id, status") and "FROM decisions" in q:
+            rows = [{"id": 7, "status": self.decision_status, "round": 3}] if self.decision_status else []
             return _HMResult(rows)
         if q.startswith("INSERT INTO messages"):
             self.inserted.append(params)
@@ -383,3 +383,67 @@ def test_memory_ctx_trae_decisiones_y_nodos_relacionados(tmp_path, monkeypatch):
 
     monkeypatch.setattr(memory_ctx, "DB_PATH", tmp_path / "no-existe.db")
     assert memory_ctx.memoria_para("cualquier cosa") == ""
+
+
+# ------------------------------------------------------------ destrabe en split
+
+def test_human_message_segui_en_split_reabre_la_decision():
+    """'seguí' (+ contexto opcional) NO arbitra: reabre la decisión en la
+    ronda siguiente con el texto como contexto para el recast."""
+    import board
+
+    class _Conn(_HMConn):
+        def __init__(self):
+            super().__init__(decision_status="split")
+            self.reopened = None
+
+        def execute(self, query, params=()):
+            q = " ".join(query.split())
+            if q.startswith("UPDATE decisions SET status = 'open', round"):
+                self.reopened = params
+                return _HMResult([{"id": 1}])
+            return super().execute(query, params)
+
+    conn = _Conn()
+    out = board.human_message(conn, "d7", "seguí, pero considerá el presupuesto")
+    assert out["kind"] == "contexto"
+    assert out["arbitrated_decision"] is None
+    assert out["reopened_decision"] == 7
+    assert not conn.arbitration_attempted, "seguí no cierra nada"
+    assert conn.reopened[0] == 4, "ronda siguiente (el fake arranca en round 3)"
+    assert conn.inserted[0][1] == "contexto"
+
+
+def test_human_message_segui_varias_formas():
+    import board
+
+    for txt in ("seguimos", "retry con más contexto", "Otra ronda por favor", "continuá"):
+        conn = _HMConn(decision_status="split")
+        out = board.human_message(conn, "d7", txt)
+        assert out["reopened_decision"] == 7, txt
+        assert out["arbitrated_decision"] is None, txt
+
+
+def test_human_message_en_split_con_ruling_sigue_siendo_arbitraje():
+    """Sin la palabra clave, un mensaje en split cierra con ruling humano
+    (comportamiento anterior intacto)."""
+    import board
+
+    conn = _HMConn(decision_status="split")
+    out = board.human_message(conn, "d7", "apruebo con la condición de casper")
+    assert out["kind"] == "arbitraje"
+    assert out["arbitrated_decision"] == 7
+    assert out["reopened_decision"] is None
+
+
+def test_consulta_de_destrabe_announce_ambas_vias():
+    import board
+
+    txt = board.consulta_destrabe_texto(3, [
+        {"head": "melchior", "position": "yes"},
+        {"head": "balthasar", "position": "no", "conditions": ["rollback"]},
+    ])
+    assert "3 ronda(s)" in txt
+    assert "melchior=yes" in txt
+    assert "balthasar=no (rollback)" in txt
+    assert "seguí" in txt and "ruling" in txt
