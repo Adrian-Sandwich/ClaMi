@@ -21,10 +21,12 @@ const MagiSound = (() => {
     } catch (_) { /* Unsupported audio must never interrupt a message. */ }
   }
   // Una voz con envolvente: frecuencia base, glide opcional, ataque y caída.
-  function tone({f, to, at = 0, dur = .2, type = 'sine', level = 1, attack = .01}) {
+  // Frequency glides and inharmonic partials give the console a sci-fi hardware character.
+  function tone({f, to, at = 0, dur = .2, type = 'sine', level = 1, attack = .01, detune = 0}) {
     const t0 = context.currentTime + at;
     const osc = context.createOscillator(), gain = context.createGain();
     osc.type = type;
+    osc.detune.value = detune;
     osc.frequency.setValueAtTime(f, t0);
     if (to) osc.frequency.exponentialRampToValueAtTime(to, t0 + dur);
     gain.gain.setValueAtTime(0, t0);
@@ -42,19 +44,27 @@ const MagiSound = (() => {
           at: opts.at ?? 0, dur: opts.dur, type: opts.type,
           level: (opts.level ?? 1) * .7, attack: opts.attack});
   }
+  function metallic({f, at = 0, dur = .18, level = .5}) {
+    tone({f, at, dur, type: 'square', level, attack: .003, detune: -11});
+    tone({f: f * 1.618, at, dur: dur * .72, type: 'triangle', level: level * .55, attack: .002, detune: 7});
+  }
   const cues = {
     // Envío: dos blips secos de consola, como teclear en la terminal MAGI.
     send() {
-      tone({f: 880, dur: .06, type: 'square', level: .5, attack: .004});
-      tone({f: 1318.5, at: .07, dur: .06, type: 'square', level: .4, attack: .004});
+      metallic({f: 740, dur: .07, level: .42});
+      tone({f: 1480, to: 620, at: .075, dur: .12, type: 'square', level: .34, attack: .004});
     },
     // Voto: una campana medida, una sola nota con coro.
-    vote() { pad(523.25, {dur: .55, level: .8, attack: .008}); },
+    vote() {
+      metallic({f: 392, dur: .1, level: .45});
+      pad(587.33, {at: .04, dur: .42, type: 'triangle', level: .62, attack: .006});
+    },
     // Veredicto: raíz — tritono — octava. El sello de la decisión.
     result() {
-      pad(164.81, {dur: .38, level: .9});
-      pad(233.08, {at: .16, dur: .38, level: .85});
-      pad(329.63, {at: .32, dur: .6, level: .9});
+      tone({f: 82.41, to: 123.47, dur: .72, type: 'sawtooth', level: .55, attack: .12});
+      pad(164.81, {dur: .38, level: .7});
+      pad(233.08, {at: .16, dur: .38, level: .68});
+      pad(329.63, {at: .32, dur: .6, level: .76});
     },
     // Alerta: drone grave sostenido y llamado de trompa en segunda menor,
     // dos veces. Es el "algo se trabó / falló la ejecución" de NERV.

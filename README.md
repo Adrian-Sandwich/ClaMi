@@ -209,7 +209,10 @@ needed: the new data lives in the existing JSON dossier.
   repo's MCP (like kimi/claude), it votes with `cast_position`. `"journal":
   "inline"` is for CLIs that don't load MCP (codex exec): the relay inlines
   the journal into the prompt and parses the `POSITION:` tag from stdout. Pin
-  the model in `args` (e.g. codex: `"args": ["exec", "-m", "gpt-5.1"]`);
+  the model in `args` when your provider supports explicit model selection. The
+  checked-in Codex seats use `"args": ["exec"]`, which lets the authenticated
+  Codex account choose its supported default model instead of hard-coding a
+  model unavailable to ChatGPT-account sessions.
   without a flag it uses your CLI's default.
 - **type `api`**: POST to an OpenAI-compatible endpoint (Ollama, LM Studio,
   llama.cpp). The journal is inlined; same vote contract.
