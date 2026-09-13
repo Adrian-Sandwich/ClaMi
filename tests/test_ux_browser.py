@@ -20,7 +20,7 @@ def page(allow_real_processes):
         page.add_init_script("window.EventSource = class {constructor() {window.feed = this;}}")
 
         def route(request):
-            filename = request.request.url.rsplit("/", 1)[-1] or "index.html"
+            filename = (request.request.url.rsplit("/", 1)[-1] or "index.html").split("?", 1)[0]
             path = ROOT / "debate-mcp" / "ui" / filename
             if filename not in ("index.html", "app.js", "sound.js", "style.css"):
                 request.abort()
