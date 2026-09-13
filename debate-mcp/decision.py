@@ -19,6 +19,10 @@ import re as _re
 POSITIONS = ("yes", "no", "conditional", "info")
 PROTOCOLS = ("vote", "critique", "adaptive")
 MAX_ROUNDS = 3
+# Las preguntas conceptuales no tienen un artefacto que aprobar. Una primera
+# ronda de tres `info` es sólo el primer encuadre; obligamos una ronda de
+# contraste antes de presentar una respuesta como consenso del consejo.
+INFO_MIN_ROUNDS = 2
 
 # una sola cabeza (modo degradado): su voto manda, pero con confidence mínima —
 # no es un veredicto MAGI, es el mejor esfuerzo disponible.
@@ -132,11 +136,20 @@ def advance(decision: dict, positions: list[dict]) -> dict:
         return {"action": "none"}
     if missing_seats(decision, positions):
         return {"action": "wait"}
+    rp = round_positions(positions, decision["round"])
+    all_info = bool(rp) and all(p["position"] == "info" for p in rp)
+    if all_info and decision["round"] < INFO_MIN_ROUNDS:
+        return {
+            "action": "next_round",
+            "minority": [
+                {"head": p["head"], "position": p["position"], "conditions": p.get("conditions")}
+                for p in rp
+            ],
+        }
     res = resolve_votes(decision, positions)
     if res is not None:
         return {"action": "close", **res}
 
-    rp = round_positions(positions, decision["round"])
     minority = [
         {"head": p["head"], "position": p["position"], "conditions": p.get("conditions")}
         for p in rp

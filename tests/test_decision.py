@@ -155,6 +155,16 @@ def test_adaptive_cierra_directo_con_mayoria():
     assert act["action"] == "close" and act["ruling"] == "yes"
 
 
+def test_info_unanime_exige_una_ronda_de_contraste():
+    d = mk_decision(round=1, protocol="adaptive")
+    first = [mk_pos(s, "info", round=1) for s in SEATS]
+    act = decision.advance(d, first)
+    assert act["action"] == "next_round"
+    assert decision.advance({**d, "round": 2}, first + [
+        mk_pos(s, "info", round=2) for s in SEATS
+    ])["action"] == "close"
+
+
 def test_adaptive_con_split_abre_critique():
     d = mk_decision(protocol="adaptive")
     pos = [mk_pos("melchior", "yes"), mk_pos("balthasar", "no"), mk_pos("casper", "conditional")]

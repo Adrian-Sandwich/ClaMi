@@ -94,6 +94,8 @@ them see the journal and the **memory graph**) and vote in parallel:
   **Continue with context** for another round or **Close with my ruling** to
   close it with your decision. Type the context or ruling and press send.
 
+Questions that all three heads classify as `info` receive a second contrast+round before closing. A first unanimous `info` is an initial framing, not a+useful synthesis; the council closes it only after that contrast round or+leaves it for arbitration when the perspectives still do not converge.
+
 If you selected an open or STALEMATE decision, your message goes **to it**:
 context while it's deliberating; on a STALEMATE you explicitly choose to
 continue or close. Continue is the initial option and the buttons keep your
