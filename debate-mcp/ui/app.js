@@ -598,7 +598,7 @@ document.getElementById("c-send").addEventListener("click", () => send());
 document.getElementById("c-input").addEventListener("input", render);
 const soundToggle = document.getElementById("sound-toggle");
 function syncSound() {
-  soundToggle.textContent = `Sound: ${MagiSound.enabled ? "ON" : "OFF"}`;
+  soundToggle.textContent = MagiSound.enabled ? "Sound: ON" : "Enable sound";
   soundToggle.setAttribute("aria-pressed", String(MagiSound.enabled));
   document.getElementById("sound-volume").value = MagiSound.volume * 100;
 }
