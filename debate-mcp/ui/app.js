@@ -350,6 +350,10 @@ async function send() {
         : `decision #${data.decision_id} opened — the council is deliberating`;
     } else if (data.action === "reopened") {
       status.textContent = `decision #${data.decision_id} reopened — the heads recast with your context`;
+    } else if (data.action === "hint") {
+      status.textContent = data.message;
+      input.value = "";
+      return;
     } else if (data.action === "arbitrated") {
       status.textContent = `decision #${data.decision_id} closed with your ruling`;
     } else if (data.action === "context") {

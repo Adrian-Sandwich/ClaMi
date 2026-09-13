@@ -21,6 +21,7 @@ mismo CSS, mismas clases, mismos colores y kanjis.
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -70,6 +71,19 @@ CONVERSATION_KINDS = ("posicion", "resultado", "arbitraje", "contexto", "consult
 
 CLIENTS: list[queue.Queue] = []
 CLIENTS_LOCK = threading.Lock()
+
+# "seguí" (u otras formas de reabrir) SIN nada más: la palabra clave del
+# destrabe usada fuera de STALEMATE no debe abrir decisiones ni quemar
+# turnos — responde con un hint. Con texto extra ("seguí con el parser")
+# sí es contexto legítimo.
+_RE_SOLO_SEGUI = re.compile(
+    r"^\s*(segu[ií]|seguimos|continu[aá]|retry|reintent[aá]|otra ronda)\s*[.!¡]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _es_solo_segui(body: str) -> bool:
+    return bool(_RE_SOLO_SEGUI.match(body or ""))
 
 
 def verdict_badge(d: dict) -> dict:
@@ -425,16 +439,37 @@ class Handler(BaseHTTPRequestHandler):
                         """
                     ).fetchone()
                     if d is None:
-                        # con artefacto (repo), production es siempre: lo
-                        # aprobado se ejecuta ahí. Sin repo, decisión común.
-                        result = board.start_decision(
-                            conn, title=body,
-                            artifact=payload.get("artifact"),
-                            protocol=payload.get("protocol") or "adaptive",
-                            production=bool(payload.get("artifact")),
-                        )
-                        result = {**result, "kind": "decision", "action": "opened",
-                                  "production": bool(payload.get("artifact"))}
+                        if _es_solo_segui(body):
+                            # no hay nada para reabrir: abrir una decisión
+                            # titulada "seguí" sería un agujero (quemaría
+                            # turnos deliberando sobre una palabra suelta)
+                            result = {
+                                "kind": "hint", "action": "hint",
+                                "message": "No hay nada en STALEMATE para reabrir. "
+                                           "Escribí qué querés hacer y el consejo lo deliberá.",
+                            }
+                        else:
+                            # con artefacto (repo), production es siempre: lo
+                            # aprobado se ejecuta ahí. Sin repo, decisión común.
+                            result = board.start_decision(
+                                conn, title=body,
+                                artifact=payload.get("artifact"),
+                                protocol=payload.get("protocol") or "adaptive",
+                                production=bool(payload.get("artifact")),
+                            )
+                            result = {**result, "kind": "decision", "action": "opened",
+                                      "production": bool(payload.get("artifact"))}
+                    elif d["status"] == "open" and _es_solo_segui(body):
+                        # "seguí" solo no agrega contexto: es la palabra de
+                        # reabrir un STALEMATE usada en el estado equivocado.
+                        # Responder sin gastar turno de las cabezas.
+                        result = {
+                            "kind": "hint", "action": "hint",
+                            "message": f"#{d['id']} ya está abierta — tu 'seguí' "
+                                       f"quedaría como contexto vacío. Las cabezas "
+                                       f"pidieron claridad: contales QUÉ tarea "
+                                       f"continuar (o abortá con el botón).",
+                        }
                     else:
                         result = board.human_message(conn, d["thread"], body)
                         if result.get("reopened_decision"):
@@ -450,7 +485,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "contexto": "context",
                                 }.get(result["kind"], result["kind"]),
                             }
-            self._send_json(result, 201)
+            self._send_json(result, 200 if result.get("action") == "hint" else 201)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, 400)
 

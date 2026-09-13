@@ -462,3 +462,51 @@ def test_fs_lista_carpetas_y_marca_repos(ui_server_conn, tmp_path):
     assert data["parent"] == str(tmp_path.parent)
     marcas = {d["name"]: d["git"] for d in data["dirs"]}
     assert marcas == {"proyecto-a": False, "proyecto-b": True}
+
+
+def test_segui_solo_en_open_responde_hint_sin_gastar_turno(ui_server_conn, monkeypatch):
+    """'seguí' solo fuera de STALEMATE no inserta mensaje ni abre decisión:
+    responde con un hint (las cabezas no recastan sobre una palabra vacía)."""
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(2, status="open")]
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda *a, **kw: pytest.fail("no tiene que llegar a human_message"),
+    )
+    monkeypatch.setattr(
+        magi_ui.board, "start_decision",
+        lambda *a, **kw: pytest.fail("no tiene que abrir una decisión 'seguí'"),
+    )
+    resp = _post(port, "/message", {"mode": "council", "body": "seguí"})
+    assert resp.status == 200
+    body = json.loads(resp.read())
+    assert body["action"] == "hint"
+    assert "#2" in body["message"]
+
+
+def test_segui_solo_sin_nada_abierto_responde_hint(ui_server_conn, monkeypatch):
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(1, status="closed", ruling="yes")]
+    monkeypatch.setattr(
+        magi_ui.board, "start_decision",
+        lambda *a, **kw: pytest.fail("no tiene que abrir una decisión 'seguí'"),
+    )
+    resp = _post(port, "/message", {"mode": "council", "body": "seguí!"})
+    body = json.loads(resp.read())
+    assert body["action"] == "hint"
+    assert "STALEMATE" in body["message"]
+
+
+def test_segui_con_contexto_en_open_si_es_contexto(ui_server_conn, monkeypatch):
+    """'seguí con el parser' SÍ es contexto legítimo: llega a human_message."""
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(2, status="open")]
+    calls = {}
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda c, thread, body: calls.update(thread=thread, body=body) or
+        {"id": 1, "kind": "contexto", "arbitrated_decision": None},
+    )
+    resp = _post(port, "/message", {"mode": "council", "body": "seguí con el parser"})
+    assert resp.status == 201
+    assert calls == {"thread": "d2", "body": "seguí con el parser"}
