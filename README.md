@@ -1,199 +1,202 @@
-# ClaMi — Sistema MAGI
+# MAGI Council — three AI heads that deliberate, vote and execute
 
-Un **consejo MAGI de tres cabezas** (Melchior / Balthasar / Casper — la persona
-vive en el asiento, el proveedor es intercambiable: kimi, codex, claude,
-Ollama, cualquier CLI o API OpenAI-compatible) que deliberan sobre tus
-preguntas y votan decisiones con ruling, minority report, cambios de parecer
-entre rondas y arbitraje humano. Con **memoria**: un grafo local que ingiere
-tus sesiones y decisiones y se inyecta en cada deliberación. Y en modo
-**producción**: el consejo aprueba un plan, un ejecutor lo implementa en una
-rama, el consejo revisa el diff y —si aprueba unánime— se mergea solo.
+A **MAGI council of three heads** (Melchior / Balthasar / Casper — the persona
+lives in the seat, the provider is swappable: kimi, codex, claude, Ollama, any
+CLI or OpenAI-compatible API) that deliberate on your questions and vote on
+decisions, with a ruling, minority report, mind changes between rounds and
+human arbitration. With **memory**: a local knowledge graph that ingests your
+agent sessions and decisions and injects them into every deliberation. And in
+**production mode**: the council approves a plan, an executor implements it on
+a dedicated branch, the council reviews the diff and — on unanimous approval —
+it merges itself.
 
-La interfaz es una web estilo MAGI (diseño de TomaszRewak/MAGI) con una sola
-caja de texto, como un CLI. Corre en Windows, macOS y Linux.
+The UI is a MAGI-style web app (design based on TomaszRewak/MAGI) with a
+single text box, like a CLI. Runs on Windows, macOS and Linux.
 
-![La UI en escritorio — consejo deliberando](docs/ux-desktop.png)
+![The UI on desktop — council deliberating](docs/ux-desktop.png)
 
-![La UI en móvil](docs/ux-mobile.png)
+![The UI on mobile](docs/ux-mobile.png)
 
-## Qué necesitás para arrancar (desde cero, en cualquier máquina)
+## What you need to get started (from scratch, on any machine)
 
 1. **Python 3.14+**.
-2. **Postgres accesible** (cualquier instalación estándar; el default del
-   sistema es `dbname=debate host=localhost`, puerto 5432, usuario = tu
-   usuario del SO). Si no tenés ninguno, en Windows el repo trae un
-   postmaster portable en `experiments/pg` y `bin\start-magi.bat` lo levanta.
-3. **Al menos una cabeza** (sin cabezas el sistema corre "degradado" y sólo
-   vos podés cerrar decisiones):
-   - **kimi** (u otro agente CLI con MCP: claude, …) — investiga el repo con
-     herramientas y vota por MCP;
-   - **codex** u otro CLI de texto plano — vota con el journal inlineado en el
-     prompt (modo `journal: "inline"`);
-   - **Ollama / LM Studio / cualquier endpoint OpenAI-compatible** — cabeza
-     API local sin costo.
-   Todo se configura en `debate-mcp/heads.json`; no hace falta tener las tres.
-4. Opcional: cuenta de **OpenAI** (codex) y/o **Moonshot** (kimi) si usás esas
-   cabezas cloud.
+2. **A reachable Postgres** (any standard install; the system default is
+   `dbname=debate host=localhost`, port 5432, user = your OS user). If you
+   have none, on Windows the repo ships a portable postmaster in
+   `experiments/pg` and `bin\start-magi.bat` starts it.
+3. **At least one head** (with no heads the system runs "degraded" and only
+   you can close decisions):
+   - **kimi** (or another MCP-capable agent CLI: claude, …) — investigates
+     the repo with tools and votes via MCP;
+   - **codex** or another plain-text CLI — votes with the journal inlined in
+     the prompt (`journal: "inline"` mode);
+   - **Ollama / LM Studio / any OpenAI-compatible endpoint** — local API
+     head at no cost.
+   All configured in `debate-mcp/heads.json`; you don't need all three.
+4. Optional: an **OpenAI** account (codex) and/or **Moonshot** (kimi) if you
+   use those cloud heads.
 
-## Instalación y primer arranque
+## Install and first run
 
 ```bash
-git clone https://github.com/Adrian-Sandwich/ClaMi.git
-cd ClaMi/debate-mcp
+git clone https://github.com/Adrian-Sandwich/magi-council.git
+cd magi-council/debate-mcp
 
 # venv (Windows: .venv\Scripts\python -m venv .venv)
 python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# base de datos (idempotente; crea el esquema o aplica lo que falte)
+# database (idempotent; creates the schema or applies what's missing)
 .venv/bin/python schema/migrate.py
 
-# ¿todo bien? (necesita Postgres arriba)
+# all good? (needs Postgres up)
 .venv/bin/python smoke_test.py
 ```
 
-Atajos por sistema:
+Per-OS shortcuts:
 
-- **Windows**: `debate-mcp\bin\start-magi.bat` levanta Postgres portable (si
-  no corre), migra y abre relay + UI en ventanas propias.
-  `debate-mcp\bin\stop-magi.bat` baja todo.
-- **macOS/Linux**: `.venv/bin/python relay.py` y `.venv/bin/python magi_ui.py`
-  (daemonizalos como prefieras; `launchd/install.sh` es la vía macOS).
+- **Windows**: `debate-mcp\bin\start-magi.bat` starts the portable Postgres
+  (if not running), migrates, and opens relay + UI in their own windows.
+  `debate-mcp\bin\stop-magi.bat` shuts everything down.
+- **macOS/Linux**: `.venv/bin/python relay.py` and `.venv/bin/python magi_ui.py`
+  (daemonize them as you like; `launchd/install.sh` is the macOS way).
 
-Después abrí **http://127.0.0.1:8051**.
+Then open **http://127.0.0.1:8051**.
 
-**Registrar el MCP en tus agentes** (para que las cabezas CLI vean el
-tablero): el repo trae `.mcp.json` en la raíz — cualquier agente que corra
-desde el repo lo carga solo (en Windows apunta a
-`.venv/Scripts/python.exe`; en macOS/Linux cambialo a `bin/python`). Para
-config global, tu agente suele tener un comando tipo `kimi mcp add` /
-`claude mcp add` apuntando a `debate-mcp/server.py` con el python del venv.
+**Registering the MCP in your agents** (so CLI heads can see the board): the
+repo ships `.mcp.json` at the root — any agent running from the repo loads it
+automatically (on Windows it points to `.venv/Scripts/python.exe`; on
+macOS/Linux change it to `bin/python`). For a global config, your agent
+usually has a command like `kimi mcp add` / `claude mcp add` pointing at
+`debate-mcp/server.py` with the venv's python.
 
-**Grafo de memoria** (opcional pero recomendado): corre
-`memory-graph/refresh.sh` una vez (ingiere sesiones de tus agentes, decisiones
-y READMEs a `memory-graph/memory.db`) y agendalo (Windows:
-`schauska... schtasks //create //tn "ClaMi-memory-refresh" //tr "...bash... refresh.sh" //sc hourly`;
-macOS/Linux: cron o launchd). Sin grafo, el sistema funciona pero las
-cabezas no recuerdan nada.
+**Memory graph** (optional but recommended): run `memory-graph/refresh.sh`
+once (ingests your agents' sessions, decisions and READMEs into
+`memory-graph/memory.db`) and schedule it (Windows:
+`schtasks /create /tn "magi-council-memory-refresh" /tr "...bash... refresh.sh" /sc hourly`;
+macOS/Linux: cron or launchd). Without the graph the system works, but the
+heads remember nothing.
 
-Estado del sistema en cualquier momento: `.venv/bin/python healthcheck.py`.
+System status at any time: `.venv/bin/python healthcheck.py`.
 
-## Cómo se usa (la web, en 30 segundos)
+## How you use it (the web, in 30 seconds)
 
-Una sola caja de texto con dos modos (tabs arriba a la izquierda):
+A single text box with two modes (tabs at the top left):
 
-### COUNCIL — consultas con votación
+### COUNCIL — decisions with a vote
 
-Tu mensaje se somete al consejo. Si no hay ninguna decisión abierta, **abre
-una decisión nueva**: las tres cabezas investigan (las CLI pueden leer el
-repo; todas ven el journal y la **memoria del grafo**) y votan en paralelo:
+Your message goes to the council. If there's no open decision, it **opens a
+new one**: the three heads investigate (CLI heads can read the repo; all of
+them see the journal and the **memory graph**) and vote in parallel:
 
-- **APPROVED / REJECTED**: mayoría 2/3 o unánime.
-- **CONDITIONAL**: aprobado con condiciones (quedan en el dossier).
-- **STALEMATE**: no hubo acuerdo. El consejo te escribe una **consulta**:
-  elegí **Continue with context** para otra ronda o **Close with my ruling**
-  para cerrarla con tu decisión. Escribí el contexto o ruling y pulsá enviar.
+- **APPROVED / REJECTED**: 2/3 majority or unanimous.
+- **CONDITIONAL**: approved with conditions (kept in the dossier).
+- **STALEMATE**: no agreement. The council writes you a **query**: choose
+  **Continue with context** for another round or **Close with my ruling** to
+  close it with your decision. Type the context or ruling and press send.
 
-Si seleccionaste una decisión abierta o en STALEMATE, tu mensaje va **a ella**:
-contexto si está deliberando; en STALEMATE elegís explícitamente continuar
-o cerrar. Continuar es la opción inicial y los botones conservan tu texto.
+If you selected an open or STALEMATE decision, your message goes **to it**:
+context while it's deliberating; on a STALEMATE you explicitly choose to
+continue or close. Continue is the initial option and the buttons keep your
+text.
 
-La UI envía el ID de la decisión seleccionada. Si se cerró antes de recibir
-el mensaje, responde con un error en vez de enviarlo a otra. En una decisión
-en ejecución, el texto agrega contexto y **"seguí"** habilita el reintento
-si falló. El historial del fallo se conserva. **New question** prepara otra
-consulta sin enviarla. El botón de envío indica **Ask council**, **Start
-production**, **Add context** o la acción seleccionada. El repositorio solo
-se ofrece al abrir una decisión. Durante una desconexión se pausa el envío;
-los errores conservan el borrador y no se reintenta automáticamente.
+The UI sends the selected decision's ID. If it closed before your message
+arrived, you get an error instead of having it land on another decision. On a
+decision in execution, text adds context and **"retry"** enables the retry
+after a failure. The failure history is preserved. **New question** prepares
+another query without sending it. The send button shows **Ask council**,
+**Start production**, **Add context** or the selected action. The repo field
+is only offered when opening a decision. During a disconnect sending pauses;
+errors keep your draft and never auto-retry.
 
-**Sound: OFF / ON** activa señales originales 100% sintetizadas, con estética
-MAGI/Evangelion: blip de consola al enviar, campana cuando una cabeza vota,
-motivo de veredicto (raíz–tritono–octava) y una alerta grave de dos notas
-cuando el consejo se trabó o falló la ejecución. Arranca apagado, ofrece
-volumen y recuerda la preferencia localmente. No reproduce grabaciones ni
-música de Evangelion: todo se sintetiza en el momento con WebAudio.
-La primera carga y las reconexiones no reproducen avisos históricos.
-Los triángulos conservan la estética MAGI, admiten teclado y abren el
-razonamiento en un diálogo que se cierra con Escape. La interfaz se adapta
-a móvil y respeta la preferencia del sistema de reducir movimiento.
+**Sound: OFF / ON** enables original 100% synthesized cues with a
+MAGI/Evangelion aesthetic: a console blip on send, a chime when a head votes,
+a verdict motif (root–tritone–octave) and a grave two-note alert when the
+council is stuck or execution failed. It starts off, offers volume and
+remembers your preference locally. It plays no Evangelion recordings or
+music: everything is synthesized on the fly with WebAudio.
+First load and reconnections don't replay old notifications.
+The triangles keep the MAGI aesthetic, are keyboard-accessible and open the
+reasoning in a dialog that closes with Escape. The UI adapts to mobile and
+respects the system reduced-motion preference.
 
-Las pruebas opcionales de navegador están en `tests/test_ux_browser.py`:
-requieren Playwright y `CLAMI_BROWSER_PATH` apuntando a Chrome o Chromium.
-Interceptan todas las solicitudes y nunca envían mensajes al tablero real.
+The optional browser tests live in `tests/test_ux_browser.py`: they need
+Playwright and `CLAMI_BROWSER_PATH` pointing at Chrome or Chromium. They
+intercept every request and never send messages to the real board.
 
-### CHAT — charla libre con las tres cabezas
+### CHAT — open conversation with the three heads
 
-Tu mensaje abre ronda en un thread compartido y las cabezas responden en
-turno, cada una desde su eje (Melchior: verdad técnica · Balthasar: riesgo y
-cuidado · Casper: lo que realmente querés vos). Pensá en "preguntarle a tres
-colegas a la vez", no en una votación. El chat también cierra con dos
-veredictos cruzados o cuando arbitrás.
+Your message opens a round in a shared thread and the heads answer in turn,
+each from its axis (Melchior: technical truth · Balthasar: risk and care ·
+Casper: what you actually want). Think "asking three colleagues at once",
+not a vote. Chat also closes with two crossed verdicts or when you arbitrate.
 
-**¿Cuándo cuál?** COUNCIL cuando querés una **decisión con respaldo** (¿hago
-X?, ¿mergeamos?, ¿qué enfoque elijo?) — queda auditada con confianza y
-minoría. CHAT cuando querés **explorar ideas, opiniones o discusión** sin
-formalidad.
+**Which one when?** COUNCIL when you want a **decision with backing** (should
+I do X?, do we merge?, which approach?) — it's audited with confidence and
+minority report. CHAT when you want to **explore ideas, opinions or
+discussion** without formality.
 
-### Los `#n` (la fila de chips de colores)
+### The `#n` (the row of colored chips)
 
-Cada decisión tiene un número: `#12`. Los chips abajo son tu **historial** —
-click y volvés a ver esa deliberación con su conversación. El color es el
-veredicto: verde APPROVED, rojo REJECTED, naranja CONDITIONAL, azul INFO, gris
-STALEMATE. `#4 CONDITIONAL` significa "la decisión 4 cerró con condiciones".
+Each decision has a number: `#12`. The chips at the bottom are your
+**history** — click one and you're back in that deliberation with its
+conversation. The color is the verdict: green APPROVED, red REJECTED, orange
+CONDITIONAL, blue INFO, gray STALEMATE. `#4 CONDITIONAL` means "decision 4
+closed with conditions".
 
-### Cambiar de repo o carpeta de trabajo
+### Switching repo or working folder
 
-El campo **"repo folder for production runs"** bajo la caja: pegá la ruta
-(`C:\src\mi-repo`) y esa consulta (y solo esa) trabaja sobre ese repo — las
-cabezas CLI lo investigan con cwd ahí. Sin repo, las decisiones usan el repo
-del sistema (ClaMi) o el default del relay (`DEBATE_DEFAULT_CWD`).
+The **"repo folder for production runs"** field under the box: paste a path
+(`C:\src\my-repo`) and that query (only that one) works on that repo — CLI
+heads investigate it with cwd there. Without a repo, decisions use the
+system's repo (this one) or the relay's default (`DEBATE_DEFAULT_CWD`).
 
-### Producción al seleccionar un repo
+### Production when a repo is selected
 
-Con un repo seleccionado, la consulta es un **plan para que el sistema lo
-ejecute**. La UI anuncia esa intención antes de enviar:
+With a repo selected, your query is a **plan for the system to execute**. The
+UI announces that intent before sending:
 
-1. El consejo **delibera el plan** (como cualquier decisión).
-2. Si lo aprueba, el **ejecutor** (el asiento con `"executor": true` en
-   heads.json, por defecto Melchior/kimi) lo implementa en la rama
-   `magi/d<n>` en un **worktree propio**, partiendo del commit base guardado.
-   Tu directorio y tus archivos sin commit quedan fuera de esa ejecución.
-3. Se abre una **revisión** del commit exacto generado. Las cabezas inspeccionan
-   el worktree; el dossier guarda el ID de revisión, SHA base y SHA revisado.
-   Si el ejecutor deja cambios sin commit, la ejecución falla antes de revisar.
-4. Unánime → se prepara un **merge `--no-ff` en un worktree de integración**
-   y se avanza tu rama con `--ff-only`. Se exige la misma rama base, el mismo
-   commit base, directorios limpios y el commit revisado intacto. El contenido
-   del merge debe coincidir con el aprobado. Mayoría 2/3, rechazo o cambios
-   posteriores → **MERGE PENDING**, con el motivo en el journal.
+1. The council **deliberates the plan** (like any decision).
+2. If approved, the **executor** (the seat with `"executor": true` in
+   heads.json, Melchior/kimi by default) implements it on branch
+   `magi/d<n>` in its **own worktree**, from the saved base commit. Your
+   directory and your uncommitted files stay out of that execution.
+3. A **review** opens on the exact produced commit. The heads inspect the
+   worktree; the dossier stores the review ID, base SHA and reviewed SHA. If
+   the executor leaves uncommitted changes, execution fails before review.
+4. Unanimous → a **`--no-ff` merge is prepared in an integration worktree**
+   and your branch advances with `--ff-only`. It requires the same base
+   branch, the same base commit, clean directories and the reviewed commit
+   intact. The merge content must match what was approved. 2/3 majority,
+   rejection or later changes → **MERGE PENDING**, with the reason in the
+   journal.
 
-Sin repo, la decisión sólo se **decide**; con repo, además se **hace**.
-Las condiciones de los votos `conditional` de la ronda aprobada se conservan
-para el ejecutor, incluidas las de la mayoría. Si la ejecución falla, espera
-un reintento explícito; los fallos no se borran del journal.
+Without a repo, a decision is only **decided**; with a repo, it's also
+**done**. The conditions from `conditional` votes in the approved round are
+preserved for the executor, including the majority's. If execution fails, it
+waits for an explicit retry; failures are never deleted from the journal.
 
-Los worktrees se conservan en `<git-common-dir>/magi-worktrees/` para inspección
-y recuperación. "seguí" reutiliza el worktree de ejecución y abre una revisión
-nueva; nunca cambia silenciosamente la base del plan. Si tu rama base avanzó,
-abrí un plan nuevo sobre esa base o resolvé la integración manualmente.
-Un bloqueo de Postgres por repositorio coordina los ejecutores y merges de los
-relays que usan esa base de datos. Evitá operaciones Git manuales concurrentes
-durante el paso final de integración: ese bloqueo sólo coordina a los relays.
+Worktrees are kept in `<git-common-dir>/magi-worktrees/` for inspection and
+recovery. "retry" reuses the execution worktree and opens a new review; it
+never silently changes the plan's base. If your base branch moved, open a new
+plan on that base or resolve the integration manually. A Postgres lock per
+repository coordinates executors and merges across relays sharing that
+database. Avoid manual Git operations concurrently during the final
+integration step: that lock only coordinates relays.
 
-Las revisiones antiguas, sin un commit y un ID de revisión vinculados al plan,
-no habilitan auto-merge. Se conservan para resolución manual. No hace falta una
-migración de esquema: los datos nuevos se guardan en el dossier JSON existente.
+Stale reviews — without a commit and review ID bound to the plan — don't
+enable auto-merge. They're kept for manual resolution. No schema migration
+needed: the new data lives in the existing JSON dossier.
 
-## Configurar las cabezas (`debate-mcp/heads.json`)
+## Configuring the heads (`debate-mcp/heads.json`)
 
 ```jsonc
 {
   "seats": [
     { "seat": "melchior", "name": "kimi", "type": "cli",
       "bin": "~/.kimi-code/bin/kimi.exe", "args": ["-p"],
-      "executor": true },               // <- ejecuta planes aprobados
+      "executor": true },               // <- executes approved plans
     { "seat": "balthasar", "name": "codex", "type": "cli",
-      "journal": "inline",              // <- sin MCP: voto parseado del stdout
+      "journal": "inline",              // <- no MCP: vote parsed from stdout
       "bin": "C:/.../debate-mcp/bin/codex.cmd", "args": ["exec"] },
     { "seat": "casper", "name": "qwen2.5-coder", "type": "api",
       "model": "qwen2.5-coder:1.5b",
@@ -202,24 +205,24 @@ migración de esquema: los datos nuevos se guardan en el dossier JSON existente.
 }
 ```
 
-- **type `cli`** (default): proceso con herramientas. Si el agente carga el
-  MCP del repo (como kimi/claude), vota con `cast_position`. `"journal":
-  "inline"` es para CLIs que no cargan MCP (codex exec): el relay inlinea el
-  journal en el prompt y parsea el tag `POSITION:` de la salida. El modelo lo
-  fijás en `args` (p. ej. codex: `"args": ["exec", "-m", "gpt-5.1"]`); sin
-  flag usa el default de tu CLI.
-- **type `api`**: POST a un endpoint OpenAI-compatible (Ollama, LM Studio,
-  llama.cpp). El journal va inlineado; mismo contrato de voto.
+- **type `cli`** (default): a tool-using process. If the agent loads the
+  repo's MCP (like kimi/claude), it votes with `cast_position`. `"journal":
+  "inline"` is for CLIs that don't load MCP (codex exec): the relay inlines
+  the journal into the prompt and parses the `POSITION:` tag from stdout. Pin
+  the model in `args` (e.g. codex: `"args": ["exec", "-m", "gpt-5.1"]`);
+  without a flag it uses your CLI's default.
+- **type `api`**: POST to an OpenAI-compatible endpoint (Ollama, LM Studio,
+  llama.cpp). The journal is inlined; same vote contract.
 
-Las personas (ejes y sesgos) viven en `debate-mcp/personas.py` — el
-proveedor es un detalle de wiring. Cambiar de modelo es editar heads.json,
-nada más.
+The personas (axes and biases) live in `debate-mcp/personas.py` — the
+provider is just wiring. Switching models is editing heads.json, nothing
+more.
 
-## Arquitectura en una mirada
+## Architecture at a glance
 
 ```
                  ┌─────────────────────────────── http://127.0.0.1:8051
-   vos ─────────┤  magi_ui.py (stdlib+SSE)  ────┐
+   you ──────────┤  magi_ui.py (stdlib+SSE)  ────┐
                  └───────────────────────────────┤
         ┌───────────────────────────────────────┴───────────┐
         │              Postgres "debate"                    │
@@ -227,24 +230,24 @@ nada más.
         └───────────────────────────────────────┬───────────┘
                                      LISTEN/NOTIFY│ decision_all / debate_all
         ┌───────────────────────────────────────┴───────────┐
-        │  relay.py — orquestador de turnos (daemon)        │
-        │  dispara las 3 cabezas en paralelo · ejecutor     │
-        │  (modo producción) · auto-merge · memoria         │
+        │  relay.py — turn orchestrator (daemon)            │
+        │  fires the 3 heads in parallel · executor         │
+        │  (production mode) · auto-merge · memory          │
         └───────────────────────────────────────┬───────────┘
         ┌───────────┬───────────┬───────────────┴───┐
-     kimi (CLI)  codex (CLI)  qwen (API/Ollama)   ejecutor
-     MCP tools   journal inline  POSITION: tag    (kimi, rama magi/d<n>)
+     kimi (CLI)  codex (CLI)  qwen (API/Ollama)   executor
+     MCP tools   journal inline  POSITION: tag    (kimi, magi/d<n> branch)
         └───────────┴───────────┴───────────────────┘
         ┌───────────────────────────────────────────┐
-        │  memory-graph: SQLite + ingestors horarios │
-        │  (sesiones, decisiones, docs → memoria)    │
+        │  memory-graph: SQLite + hourly ingestors  │
+        │  (sessions, decisions, docs → memory)     │
         └───────────────────────────────────────────┘
 ```
 
-El motor de decisiones (`decision.py`) es puro y testeable; el tablero
-(`board.py`) concentra las escrituras; `server.py` expone el MCP; el relay
-orquesta procesos con candados por asiento, topes de disparos y wake corto
-con pendientes.
+The decision engine (`decision.py`) is pure and testable; the board
+(`board.py`) concentrates writes; `server.py` exposes the MCP; the relay
+orchestrates processes with per-seat locks, trigger caps and a short wake
+loop while work is pending.
 
 ## Tests
 
@@ -253,23 +256,23 @@ debate-mcp/.venv/bin/pip install -r debate-mcp/requirements-dev.txt
 debate-mcp/.venv/bin/pytest
 ```
 
-La suite incluye repositorios Git temporales para comprobar worktrees, reintentos
-y merges. Para verificar además el ciclo completo con Postgres, configurá
-`CLAMI_TEST_POSTGRES_DSN` antes de ejecutar pytest. Esas pruebas crean tablas
-temporales privadas y restringen `search_path` a `pg_temp`; no escriben en las
-tablas del tablero. Sin esa variable se omiten.
+The suite spins up temporary Git repositories to verify worktrees, retries
+and merges. To also verify the full cycle against Postgres, set
+`CLAMI_TEST_POSTGRES_DSN` before running pytest. Those tests create private
+temp tables and restrict `search_path` to `pg_temp`; they never write to the
+board's tables. Without that variable they're skipped.
 
-## Notas de operación
+## Operational notes
 
-- Conexión a otra base/servidor: `DEBATE_CONNINFO` (conninfo estándar de
-  libpq). El default no fija usuario: usa el del SO.
-- La UI y el relay tardan lo que tarden las cabezas: los modelos cloud
-  (kimi/codex) tardan ~15s–5min por turno; Ollama en CPU depende del tamaño
-  del modelo (los de 1.5–3B responden en segundos, los 7–8B en minutos). El
-  indicador THINKING te muestra quién está deliberando.
-- `healthcheck.py` vigila Postgres, el relay (heartbeat), decisiones viejas
-  abiertas y el grafo stale. Exit 0/1/2 para agendarlo.
-- Los `test_canary_*` se saltan solos si no hay logs reales de agentes.
-- Seguridad: las cabezas CLI corren con permisos de escritura en el cwd —
-  por eso el modo producción trabaja en rama propia y el relay tiene topes
-  de disparos por thread/decisión.
+- Connecting to another database/server: `DEBATE_CONNINFO` (standard libpq
+  conninfo). The default pins no user: it uses the OS user.
+- The UI and the relay take as long as the heads take: cloud models
+  (kimi/codex) run ~15s–5min per turn; Ollama on CPU depends on model size
+  (1.5–3B answer in seconds, 7–8B in minutes). The THINKING indicator shows
+  who's deliberating.
+- `healthcheck.py` watches Postgres, the relay (heartbeat), old open
+  decisions and a stale graph. Exit 0/1/2 to schedule it.
+- The `test_canary_*` skip themselves when there are no real agent logs.
+- Security: CLI heads run with write permissions on the cwd — that's why
+  production mode works on its own branch and the relay has per-thread /
+  per-decision trigger caps.
