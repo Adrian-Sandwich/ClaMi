@@ -1,120 +1,220 @@
-# ClaMi
+# ClaMi — Sistema MAGI
 
-Infraestructura de colaboración multiagente sobre la máquina local: un
-**consejo MAGI de tres cabezas** (Melchior/Balthasar/Casper — la persona vive
-en el asiento, el proveedor es intercambiable: claude/kimi/codex/Ollama/…)
-que debate en un journal auditable y vota decisiones con ruling, minority
-report y arbitraje humano. La interfaz del operador es una **web estilo MAGI**
-(interfaz de TomaszRewak/MAGI) con un chat de texto libre: consultas al
-consejo (votación formal) o charla con las tres cabezas. Corre en Windows,
-macOS y Linux — sin rutas hardcodeadas de ninguna máquina puntual.
+Un **consejo MAGI de tres cabezas** (Melchior / Balthasar / Casper — la persona
+vive en el asiento, el proveedor es intercambiable: kimi, codex, claude,
+Ollama, cualquier CLI o API OpenAI-compatible) que deliberan sobre tus
+preguntas y votan decisiones con ruling, minority report, cambios de parecer
+entre rondas y arbitraje humano. Con **memoria**: un grafo local que ingiere
+tus sesiones y decisiones y se inyecta en cada deliberación. Y en modo
+**producción**: el consejo aprueba un plan, un ejecutor lo implementa en una
+rama, el consejo revisa el diff y —si aprueba unánime— se mergea solo.
 
-**Este repo es la fuente única**: el venv, el esquema de la base, los
-scripts de arranque y el registro del MCP viven acá dentro.
+La interfaz es una web estilo MAGI (diseño de TomaszRewak/MAGI) con una sola
+caja de texto, como un CLI. Corre en Windows, macOS y Linux.
 
-## Estructura
+## Qué necesitás para arrancar (desde cero, en cualquier máquina)
 
-    debate-mcp/      servidor MCP "debate", relay, esquema, UI web, bin/, healthcheck
-    memory-graph/    ingestors + SQLite del grafo de memoria, export .kgraph.json
-    tests/           suite compartida (pytest), con fixtures propias
-    .mcp.json        registra el MCP "debate" para cualquier agente en este repo
-    pytest.ini       testpaths + flags
+1. **Python 3.14+**.
+2. **Postgres accesible** (cualquier instalación estándar; el default del
+   sistema es `dbname=debate host=localhost`, puerto 5432, usuario = tu
+   usuario del SO). Si no tenés ninguno, en Windows el repo trae un
+   postmaster portable en `experiments/pg` y `bin\start-magi.bat` lo levanta.
+3. **Al menos una cabeza** (sin cabezas el sistema corre "degradado" y sólo
+   vos podés cerrar decisiones):
+   - **kimi** (u otro agente CLI con MCP: claude, …) — investiga el repo con
+     herramientas y vota por MCP;
+   - **codex** u otro CLI de texto plano — vota con el journal inlineado en el
+     prompt (modo `journal: "inline"`);
+   - **Ollama / LM Studio / cualquier endpoint OpenAI-compatible** — cabeza
+     API local sin costo.
+   Todo se configura en `debate-mcp/heads.json`; no hace falta tener las tres.
+4. Opcional: cuenta de **OpenAI** (codex) y/o **Moonshot** (kimi) si usás esas
+   cabezas cloud.
 
-## Componentes
+## Instalación y primer arranque
 
-### [`debate-mcp/`](debate-mcp/README.md)
+```bash
+git clone https://github.com/Adrian-Sandwich/ClaMi.git
+cd ClaMi/debate-mcp
 
-Servidor MCP "debate": tablero de discusión persistente sobre Postgres
-(LISTEN/NOTIFY para long-poll sin polling) + motor de **decisiones MAGI**:
-tres asientos con persona (Melchior/Balthasar/Casper) y proveedor
-intercambiable (`heads.json`: claude/kimi/codex/Ollama/…, asientos CLI o API
-OpenAI-compatible) que debaten en un journal y votan posiciones estructuradas
-hasta ruling por mayoría, minority report o arbitraje. Incluye `relay.py`,
-daemon que orquesta los turnos; `magi_ui.py`, la interfaz web (chat + tablero
-en vivo por SSE); `schema/` con las migraciones versionadas; y
-`healthcheck.py`.
+# venv (Windows: .venv\Scripts\python -m venv .venv)
+python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-### [`memory-graph/`](memory-graph/README.md)
+# base de datos (idempotente; crea el esquema o aplica lo que falte)
+.venv/bin/python schema/migrate.py
 
-Grafo de memoria entre todas las conversaciones, estilo Obsidian: ingesta
-sesiones de Claude Code, sesiones de Kimi, threads y decisiones del tablero,
-docs del proyecto y el grafo de código de codebase-memory-mcp a un SQLite
-propio, y lo exporta como `.kgraph.json` para el visor 3D de
-[Node_visualizer](../Node_visualizer). `refresh.sh` re-ingesta todo
-idempotentemente, en incremental.
+# ¿todo bien? (necesita Postgres arriba)
+.venv/bin/python smoke_test.py
+```
 
-## Puesta en marcha
-
-Requisitos: Python 3.14+ y Postgres accesible. El conninfo default es
-`dbname=debate` (libpq toma usuario y host del entorno); si tu setup difiere,
-exportá `DEBATE_CONNINFO` con el conninfo estándar de libpq.
-
-    cd debate-mcp
-    python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\python -m venv .venv
-    .venv/bin/python schema/migrate.py     # esquema de la base (idempotente)
-    .venv/bin/python smoke_test.py         # ¿arranca todo?
-    .venv/bin/python relay.py &            # orquestador de turnos (daemon)
-    .venv/bin/python magi_ui.py &          # interfaz web en http://127.0.0.1:8051
-
-Atajos por plataforma:
+Atajos por sistema:
 
 - **Windows**: `debate-mcp\bin\start-magi.bat` levanta Postgres portable (si
-  no corre), migra y abre relay + UI en ventanas propias;
+  no corre), migra y abre relay + UI en ventanas propias.
   `debate-mcp\bin\stop-magi.bat` baja todo.
-- **macOS**: `debate-mcp/launchd/install.sh` registra relay, UI, refresh
-  horario del grafo y healthcheck en launchd.
+- **macOS/Linux**: `.venv/bin/python relay.py` y `.venv/bin/python magi_ui.py`
+  (daemonizalos como prefieras; `launchd/install.sh` es la vía macOS).
 
-Las cabezas se configuran en `debate-mcp/heads.json` (fuente única del
-repo, editable por máquina). En esta máquina: Melchior = Kimi CLI,
-Balthasar = qwen3 (Ollama), Casper = qwen2.5-coder (Ollama).
+Después abrí **http://127.0.0.1:8051**.
 
-Estado del sistema en cualquier momento:
+**Registrar el MCP en tus agentes** (para que las cabezas CLI vean el
+tablero): el repo trae `.mcp.json` en la raíz — cualquier agente que corra
+desde el repo lo carga solo (en Windows apunta a
+`.venv/Scripts/python.exe`; en macOS/Linux cambialo a `bin/python`). Para
+config global, tu agente suele tener un comando tipo `kimi mcp add` /
+`claude mcp add` apuntando a `debate-mcp/server.py` con el python del venv.
 
-    debate-mcp/.venv/bin/python debate-mcp/healthcheck.py
+**Grafo de memoria** (opcional pero recomendado): corre
+`memory-graph/refresh.sh` una vez (ingiere sesiones de tus agentes, decisiones
+y READMEs a `memory-graph/memory.db`) y agendalo (Windows:
+`schauska... schtasks //create //tn "ClaMi-memory-refresh" //tr "...bash... refresh.sh" //sc hourly`;
+macOS/Linux: cron o launchd). Sin grafo, el sistema funciona pero las
+cabezas no recuerdan nada.
+
+Estado del sistema en cualquier momento: `.venv/bin/python healthcheck.py`.
+
+## Cómo se usa (la web, en 30 segundos)
+
+Una sola caja de texto con dos modos (tabs arriba a la izquierda):
+
+### COUNCIL — consultas con votación
+
+Tu mensaje se somete al consejo. Si no hay ninguna decisión abierta, **abre
+una decisión nueva**: las tres cabezas investigan (las CLI pueden leer el
+repo; todas ven el journal y la **memoria del grafo**) y votan en paralelo:
+
+- **APPROVED / REJECTED**: mayoría 2/3 o unánime.
+- **CONDITIONAL**: aprobado con condiciones (quedan en el dossier).
+- **STALEMATE**: no hubo acuerdo. El consejo te escribe una **consulta**:
+  respondé con tu ruling para cerrarla, o escribí **"seguí"** (+ contexto)
+  para otra ronda — las cabezas recastan teniendo en cuenta lo que dijiste.
+
+Si ya hay una decisión abierta o en STALEMATE, tu mensaje va **a ella**:
+contexto si está deliberando, arbitraje si está en STALEMATE, "seguí" para
+reabrirla.
+
+### CHAT — charla libre con las tres cabezas
+
+Tu mensaje abre ronda en un thread compartido y las cabezas responden en
+turno, cada una desde su eje (Melchior: verdad técnica · Balthasar: riesgo y
+cuidado · Casper: lo que realmente querés vos). Pensá en "preguntarle a tres
+colegas a la vez", no en una votación. El chat también cierra con dos
+veredictos cruzados o cuando arbitrás.
+
+**¿Cuándo cuál?** COUNCIL cuando querés una **decisión con respaldo** (¿hago
+X?, ¿mergeamos?, ¿qué enfoque elijo?) — queda auditada con confianza y
+minoría. CHAT cuando querés **explorar ideas, opiniones o discusión** sin
+formalidad.
+
+### Los `#n` (la fila de chips de colores)
+
+Cada decisión tiene un número: `#12`. Los chips abajo son tu **historial** —
+click y volvés a ver esa deliberación con su conversación. El color es el
+veredicto: verde APPROVED, rojo REJECTED, naranja CONDITIONAL, azul INFO, gris
+STALEMATE. `#4 CONDITIONAL` significa "la decisión 4 cerró con condiciones".
+
+### Cambiar de repo o carpeta de trabajo
+
+El campo **"repo folder for production runs"** bajo la caja: pegá la ruta
+(`C:\src\mi-repo`) y esa consulta (y solo esa) trabaja sobre ese repo — las
+cabezas CLI lo investigan con cwd ahí. Sin repo, las decisiones usan el repo
+del sistema (ClaMi) o el default del relay (`DEBATE_DEFAULT_CWD`).
+
+### El checkbox "production"
+
+Sólo junto con un repo. Marcalo cuando tu consulta sea un **plan para que el
+sistema lo ejecute**:
+
+1. El consejo **delibera el plan** (como cualquier decisión).
+2. Si lo aprueba, el **ejecutor** (el asiento con `"executor": true` en
+   heads.json, por defecto Melchior/kimi) lo implementa en la rama
+   `magi/d<n>` de ese repo — sin tocar tu rama de trabajo.
+3. Se abre una **revisión**: el consejo vota sobre el diff.
+4. Unánime → **`git merge --no-ff` automático** en tu rama y fin. Mayoría
+   2/3 → queda la instrucción para mergear vos. Fallo → destrabe con
+   "seguí".
+
+Sin el checkbox, la decisión sólo se **decide** (te dicen cómo hacerlo); con
+el checkbox, además se **hace**.
+
+## Configurar las cabezas (`debate-mcp/heads.json`)
+
+```jsonc
+{
+  "seats": [
+    { "seat": "melchior", "name": "kimi", "type": "cli",
+      "bin": "~/.kimi-code/bin/kimi.exe", "args": ["-p"],
+      "executor": true },               // <- ejecuta planes aprobados
+    { "seat": "balthasar", "name": "codex", "type": "cli",
+      "journal": "inline",              // <- sin MCP: voto parseado del stdout
+      "bin": "C:/.../debate-mcp/bin/codex.cmd", "args": ["exec"] },
+    { "seat": "casper", "name": "qwen2.5-coder", "type": "api",
+      "model": "qwen2.5-coder:1.5b",
+      "base_url": "http://127.0.0.1:11434/v1", "timeout_secs": 600 }
+  ]
+}
+```
+
+- **type `cli`** (default): proceso con herramientas. Si el agente carga el
+  MCP del repo (como kimi/claude), vota con `cast_position`. `"journal":
+  "inline"` es para CLIs que no cargan MCP (codex exec): el relay inlinea el
+  journal en el prompt y parsea el tag `POSITION:` de la salida.
+- **type `api`**: POST a un endpoint OpenAI-compatible (Ollama, LM Studio,
+  llama.cpp). El journal va inlineado; mismo contrato de voto.
+
+Las personas (ejes y sesgos) viven en `debate-mcp/personas.py` — el
+proveedor es un detalle de wiring. Cambiar de modelo es editar heads.json,
+nada más.
+
+## Arquitectura en una mirada
+
+```
+                 ┌─────────────────────────────── http://127.0.0.1:8051
+   vos ─────────┤  magi_ui.py (stdlib+SSE)  ────┐
+                 └───────────────────────────────┤
+        ┌───────────────────────────────────────┴───────────┐
+        │              Postgres "debate"                    │
+        │   decisions · positions · messages (journal)      │
+        └───────────────────────────────────────┬───────────┘
+                                     LISTEN/NOTIFY│ decision_all / debate_all
+        ┌───────────────────────────────────────┴───────────┐
+        │  relay.py — orquestador de turnos (daemon)        │
+        │  dispara las 3 cabezas en paralelo · ejecutor     │
+        │  (modo producción) · auto-merge · memoria         │
+        └───────────────────────────────────────┬───────────┘
+        ┌───────────┬───────────┬───────────────┴───┐
+     kimi (CLI)  codex (CLI)  qwen (API/Ollama)   ejecutor
+     MCP tools   journal inline  POSITION: tag    (kimi, rama magi/d<n>)
+        └───────────┴───────────┴───────────────────┘
+        ┌───────────────────────────────────────────┐
+        │  memory-graph: SQLite + ingestors horarios │
+        │  (sesiones, decisiones, docs → memoria)    │
+        └───────────────────────────────────────────┘
+```
+
+El motor de decisiones (`decision.py`) es puro y testeable; el tablero
+(`board.py`) concentra las escrituras; `server.py` expone el MCP; el relay
+orquesta procesos con candados por asiento, topes de disparos y wake corto
+con pendientes.
 
 ## Tests
 
-    debate-mcp/.venv/bin/pip install -r debate-mcp/requirements-dev.txt
-    debate-mcp/.venv/bin/pytest
-
-121 tests repartidos en seis archivos:
-
-- `tests/test_parsers.py` (13) — parseo de los JSONL de Claude y Kimi, más los
-  canarios de formato contra los logs reales.
-- `tests/test_relay.py` (38) — disparo del relay, radio de daño, orquestación
-  de decisiones MAGI (CLI y API), turnos de chat, paralelismo por asiento,
-  portabilidad del kill de procesos y estado.
-- `tests/test_db.py` (13) — capa de acceso del grafo de memoria y de la
-  ingesta de decisiones.
-- `tests/test_decision.py` (33) — motor de decisiones: mayorías, splits,
-  rondas de crítica, cambios de parecer, turnos pendientes, prompts de cabeza
-  y mensajes del operador humano.
-- `tests/test_apihead.py` (9) — asientos API: parseo del voto `POSITION:` y
-  chat contra un endpoint OpenAI-compatible de mentira.
-- `tests/test_ui.py` (17) — UI MAGI: kanji del veredicto, snapshot con chat,
-  frame SSE, server HTTP end-to-end y robustez del POST.
-
-## Ramas
-
-`main` es el tronco y es lo que corre en la máquina. Las ramas de trabajo
-salen de `main` y vuelven por fast-forward, sin merge commits.
+```bash
+debate-mcp/.venv/bin/pip install -r debate-mcp/requirements-dev.txt
+debate-mcp/.venv/bin/pytest        # 137 tests
+```
 
 ## Notas de operación
 
-- La base se llama `debate`. El conninfo default no fija usuario ni host:
-  libpq usa el usuario del sistema operativo y localhost. Para apuntar a otra
-  base u otro servidor, `DEBATE_CONNINFO`.
-- El `.mcp.json` del repo apunta al venv por ruta relativa. En Windows el
-  intérprete del venv es `.venv/Scripts/python.exe` (el archivo ya trae esa
-  variante); en macOS/Linux, `bin/python`. Un registro viejo a mano en la
-  config global del agente (con la ruta absoluta de otro checkout) le gana y
-  falla con ENOENT: `migrate_paths.py` lo reescribe.
-- Los `test_canary_*` corren contra los logs reales de `~/.claude` y
-  `~/.kimi-code`, y fallan cuando el formato de esos logs cambia. Es a
-  propósito: son el detector de drift de los ingestors. Si esos logs no están
-  (otra máquina, CI), se saltan solos.
-- Si `healthcheck.py` reporta Postgres inalcanzable, mirá el log del servidor
-  (`pg.log` del portable, o el del servicio de tu sistema) antes que nada: un
-  `postmaster.pid` stale o una laptop suspendida producen el mismo síntoma
-  (el relay lo sobrevive con backoff, pero el tablero no procesa hasta que la
-  base vuelve).
+- Conexión a otra base/servidor: `DEBATE_CONNINFO` (conninfo estándar de
+  libpq). El default no fija usuario: usa el del SO.
+- La UI y el relay tardan lo que tarden las cabezas: los modelos cloud
+  (kimi/codex) tardan ~15s–5min por turno; Ollama en CPU depende del tamaño
+  del modelo (los de 1.5–3B responden en segundos, los 7–8B en minutos). El
+  indicador THINKING te muestra quién está deliberando.
+- `healthcheck.py` vigila Postgres, el relay (heartbeat), decisiones viejas
+  abiertas y el grafo stale. Exit 0/1/2 para agendarlo.
+- Los `test_canary_*` se saltan solos si no hay logs reales de agentes.
+- Seguridad: las cabezas CLI corren con permisos de escritura en el cwd —
+  por eso el modo producción trabaja en rama propia y el relay tiene topes
+  de disparos por thread/decisión.
