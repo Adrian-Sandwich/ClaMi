@@ -19,7 +19,8 @@
       "args": [
         "exec"
       ],
-      "timeout_secs": 900
+      "timeout_secs": 900,
+      "tools": true
     },
     {
       "seat": "casper",
@@ -30,7 +31,8 @@
       "args": [
         "exec"
       ],
-      "timeout_secs": 900
+      "timeout_secs": 900,
+      "tools": true
     }
   ]
 }

@@ -707,3 +707,44 @@ def test_la_memoria_del_grafo_entra_al_prompt_de_la_cabeza(fired_magi, monkeypat
     relay.process_cycle(FakeConn([], decisions=[mk_decision_row()]), fresh_state())
     assert fired_magi, "tiene que haber disparos"
     assert all("MEMORIA-PRUEBA-X" in c["prompt"] for c in fired_magi)
+
+
+def test_cabeza_inline_con_tools_investiga_antes_de_votar(fired_magi, monkeypatch, tmp_path):
+    """Simetria de capacidades: un asiento inline con 'tools': true (codex exec
+    con sandbox) recibe un prompt que le permite investigar el repo con sus
+    herramientas antes de emitir el POSITION — no el contrato pasivo de 'solo
+    responde con el tag'. Las personalidades sesgan el criterio, no las
+    capacidades: si solo una cabeza puede mirar el repo, el consejo entero
+    queda sesgado a lo que esa cabeza ve."""
+    prompts = {}
+
+    def fake_run(seat_info, prompt, cwd, timeout, token=None):
+        prompts[seat_info["seat"]] = prompt
+        return "POSITION: yes\n\nvi el repo, voto si"
+
+    monkeypatch.setattr(relay, "_run_cli_inline", fake_run)
+    monkeypatch.setattr(relay.board, "record_position",
+                        lambda *a, **kw: ({"action": "wait"}, 1))
+    monkeypatch.setattr(relay, "connect", lambda: FakeConn([]))
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+
+    seat_activo = {"seat": "balthasar", "name": "codex", "type": "cli",
+                   "journal": "inline", "tools": True,
+                   "bin": "/fake/bin", "args": ["exec"]}
+    d = mk_decision_row()
+    cwd = str(tmp_path)
+    relay._run_cli_inline_turn(seat_activo, d, cwd, memory="Memoria X")
+
+    prompt = prompts["balthasar"]
+    assert "INVESTIGÁ con tus herramientas" in prompt
+    assert "SOLO LECTURA" in prompt
+    assert "Memoria X" in prompt
+    assert cwd in prompt
+    assert "POSITION: yes|no|conditional|info" in prompt
+
+    # sin tools: el prompt pasivo NO invita a investigar
+    prompts.clear()
+    seat_pasivo = dict(seat_activo)
+    del seat_pasivo["tools"]
+    relay._run_cli_inline_turn(seat_pasivo, d, cwd, memory=None)
+    assert "INVESTIGÁ con tus herramientas" not in prompts["balthasar"]

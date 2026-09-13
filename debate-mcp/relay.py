@@ -574,8 +574,13 @@ def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None 
     try:
         with connect() as conn:
             journal = _journal_inline(conn, d["thread"])
-        system, user = apihead.build_api_prompt(seat_info["seat"], d, journal, memory=memory)
-        prompt = f"{system}\n\n{user}"
+        if seat_info.get("tools"):
+            # cabeza con herramientas propias (codex exec y sandbox): misma
+            # capacidad de investigación que la cabeza MCP, mismo contrato.
+            prompt = _prompt_inline_activo(seat_info, d, journal, memory, cwd)
+        else:
+            system, user = apihead.build_api_prompt(seat_info["seat"], d, journal, memory=memory)
+            prompt = f"{system}\n\n{user}"
         text = _run_cli_inline(
             seat_info, prompt, cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
@@ -1277,6 +1282,44 @@ def _reap_closed_decision_procs(conn) -> None:
         event("trigger_done", rc=-1, timed_out=False,
               error="abortado: la decisión cerró", thread=thread,
               author=token.split("::")[-1], token=token)
+
+
+
+def _prompt_inline_activo(seat_info: dict, d: dict, journal: list[dict],
+                          memory: str | None, cwd: str) -> str:
+    """Prompt de decisión para una cabeza CLI-sin-MCP que SÍ tiene
+    herramientas (codex exec con sandbox, p.ej.). Mismo contrato de voto que
+    las demás, pero con capacidad de investigación simétrica a la cabeza MCP:
+    las personalidades sesgan el criterio, no las capacidades — si sólo una
+    cabeza puede mirar el repo, el consejo entero queda sesgado a lo que esa
+    cabeza ve."""
+    try:
+        persona = personas.system_prompt(seat_info["seat"])
+    except ValueError:
+        persona = f"Sos el asiento '{seat_info['seat']}' del sistema MAGI."
+    history = "\n\n".join(
+        f"[{m['author']} · {m['kind']}]:\n{(m['body'] or '')[:apihead.BODY_CHARS]}"
+        for m in journal
+    ) or "(journal vacío)"
+    memoria_txt = f"\n\n{memory}" if memory else ""
+    return (
+        f"{persona}\n\n"
+        f"Decisión #{d['id']} (protocolo {d['protocol']}, ronda {d['round']}): {d['title']}\n"
+        f"Artefacto sobre el que se decide: {d.get('artifact') or '—'} "
+        f"(tu directorio de trabajo es {cwd})\n"
+        f"{memoria_txt}\n\n"
+        f"Journal del debate hasta ahora:\n{history}\n\n"
+        "Antes de votar, INVESTIGÁ con tus herramientas: leé los archivos del "
+        "repo que importen, corré comandos de SOLO LECTURA (git status/diff, "
+        "grep, tests si aplican). No modifiques nada.\n"
+        "Tu respuesta FINAL termina SIEMPRE con esta estructura y nada fuera "
+        "de ella después:\n"
+        "POSITION: yes|no|conditional|info\n"
+        "CONDITIONS: <condiciones separadas por ;> (sólo si position=conditional)\n"
+        "<tu razonamiento completo, citando lo que viste>\n\n"
+        "Votá desde tu eje, no desde el consenso esperado. Si es la ronda 2 o "
+        "más, revisá tu posición anterior a la luz de las otras cabezas."
+    )
 
 
 if __name__ == "__main__":
