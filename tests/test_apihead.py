@@ -121,3 +121,20 @@ def test_run_turn_completo_con_endpoint_falso(fake_endpoint):
     vote = apihead.run_turn(seat, _decision(), journal)
     assert vote["position"] == "yes"
     assert "Porque sí." in vote["body"]
+
+
+def test_strip_echo_quita_prompt_y_banner_de_codex():
+    """codex exec imprime prompt + metadatos + respuesta repetida: el journal
+    y el voto quieren sólo la respuesta del asistente."""
+    prompt = "Sos CASPER•3...\n\nDecisión #13... Votá."
+    stdout = (
+        "OpenAI Codex v0.154.0\n--------\nworkdir: C:\repo\nsession id: abc\n"
+        "--------\nuser\n" + prompt + "\ncodex\nPOSITION: yes\n\nLa respuesta útil.\n"
+        "tokens used 4,407\nPOSITION: yes\n\nLa respuesta útil.\n"
+    )
+    out = apihead.strip_echo(stdout, prompt)
+    assert out == "POSITION: yes\n\nLa respuesta útil."
+
+    # texto sin eco ni banner queda intacto
+    crudo = "POSITION: no\n\nmi razonamiento"
+    assert apihead.strip_echo(crudo, prompt) == crudo

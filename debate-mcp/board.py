@@ -295,3 +295,31 @@ def human_message(conn, thread: str, body: str) -> dict:
         "id": row["id"], "kind": kind,
         "arbitrated_decision": arbitrated, "reopened_decision": reopened,
     }
+
+
+def abort_decision(conn, decision_id: int) -> dict | None:
+    """Aborta una decisión abierta, en STALEMATE o en ejecución: cierra con
+    el flag 'aborted' en el dossier (no es un ruling, es un corte del
+    operador) y deja el mensaje en el journal. El relay sierra los procesos
+    de sus cabezas/ejecutor en su próximo ciclo (ven el status cerrado).
+    Devuelve la fila afectada o None si ya estaba cerrada."""
+    row = conn.execute(
+        """
+        UPDATE decisions
+        SET status = 'closed', closed_at = now(),
+            minority_report = COALESCE(minority_report, '{}'::jsonb) || '{"aborted": true}'::jsonb
+        WHERE id = %s AND status IN ('open', 'split', 'executing')
+        RETURNING id, thread, title
+        """,
+        (decision_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        """
+        INSERT INTO messages (thread, author, kind, body, artifact)
+        VALUES (%s, 'adrian', 'arbitraje', %s, NULL)
+        """,
+        (row["thread"], "ABORTADA por el operador — la deliberación se corta acá."),
+    )
+    return dict(row)

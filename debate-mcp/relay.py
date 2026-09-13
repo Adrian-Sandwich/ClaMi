@@ -130,6 +130,13 @@ log = logging.getLogger("relay")
 _inflight: set[str] = set()
 _inflight_lock = threading.Lock()
 
+# procesos vivos por token (Popen de disparos CLI y ejecutores). El relay
+# los siega cuando la decisión de su thread ya no está abierta ni ejecutando
+# (abort del operador, cierre por el tercer voto, etc.): mejor matar un
+# proceso que dejarlo quemar tokens sobre una deliberación que terminó.
+_procs: dict[str, subprocess.Popen] = {}
+_procs_lock = threading.Lock()
+
 _RE_LINE_SUFFIX = re.compile(r":\d+$")
 # Los journals de decisiones viven en threads 'd<id>' (provisional al abrir,
 # final tras el primer INSERT — ver board.start_decision). El patrón queda
@@ -343,6 +350,8 @@ def _supervise(proc: subprocess.Popen, meta: dict) -> None:
 
     event("trigger_done", rc=rc, timed_out=timed_out, duration_s=duration, **meta)
 
+    with _procs_lock:
+        _procs.pop(meta["token"], None)
     with _inflight_lock:
         _inflight.discard(meta["token"])
 
@@ -377,6 +386,8 @@ def trigger(seat_name: str, thread: str, since_id: int, cwd: str, prompt: str, m
 
     with _inflight_lock:
         _inflight.add(meta["token"])
+    with _procs_lock:
+        _procs[meta["token"]] = proc
     log.info("disparo %s en thread=%s cwd=%s -> %s", seat_name, thread, cwd, out_path.name)
     event("trigger_spawned", pid=proc.pid, **meta)
 
@@ -506,11 +517,13 @@ def fire_api_chat_turn(seat_info: dict, thread: str, since_id: int) -> bool:
 
 # ------------------------------------------- cabezas CLI sin MCP (journal inline)
 
-def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int) -> str:
+def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int,
+                    token: str | None = None) -> str:
     """Corre una cabeza CLI con el prompt por STDIN (archivo temporal) y
     devuelve su stdout completo. STDIN en vez de argv: los prompts de turno
     tienen comillas y tildes que el re-quoting de shims .cmd (codex.cmd)
-    rompería; y `codex exec -` lee el prompt de stdin de todos modos."""
+    rompería; y `codex exec -` lee el prompt de stdin de todos modos. Si
+    pasa un token, el proceso queda registrado para poder abortarlo."""
     with tempfile.TemporaryDirectory(prefix=f"magi-{seat_info['seat']}-") as tmp:
         pin = Path(tmp) / "prompt.txt"
         pout = Path(tmp) / "out.txt"
@@ -520,7 +533,15 @@ def _run_cli_inline(seat_info: dict, prompt: str, cwd: str, timeout: int) -> str
                 [seat_info["bin"], *seat_info.get("args", []), "-"],
                 cwd=cwd, stdin=fin, stdout=fout, stderr=subprocess.STDOUT,
             )
-            rc = proc.wait(timeout=timeout)
+            if token is not None:
+                with _procs_lock:
+                    _procs[token] = proc
+            try:
+                rc = proc.wait(timeout=timeout)
+            finally:
+                if token is not None:
+                    with _procs_lock:
+                        _procs.pop(token, None)
         text = pout.read_text(encoding="utf-8", errors="replace")
     if rc != 0:
         raise RuntimeError(f"{seat_info['seat']} salió rc={rc}: {text[-300:]}")
@@ -554,10 +575,13 @@ def _run_cli_inline_turn(seat_info: dict, d: dict, cwd: str, memory: str | None 
         with connect() as conn:
             journal = _journal_inline(conn, d["thread"])
         system, user = apihead.build_api_prompt(seat_info["seat"], d, journal, memory=memory)
+        prompt = f"{system}\n\n{user}"
         text = _run_cli_inline(
-            seat_info, f"{system}\n\n{user}", cwd,
+            seat_info, prompt, cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
+            token=meta["token"],
         )
+        text = apihead.strip_echo(text, prompt)
         vote = apihead.parse_vote(text)
         with connect() as conn:
             with conn.transaction():
@@ -606,10 +630,13 @@ def _run_cli_inline_chat_turn(seat_info: dict, thread: str, cwd: str) -> None:
         with connect() as conn:
             journal = _journal_inline(conn, thread)
         system, user = apihead.build_chat_prompt(seat_info["seat"], journal)
+        prompt = f"{system}\n\n{user}"
         text = _run_cli_inline(
-            seat_info, f"{system}\n\n{user}", cwd,
+            seat_info, prompt, cwd,
             seat_info.get("timeout_secs", AGENT_TIMEOUT_SECS),
-        ).strip()
+            token=meta["token"],
+        )
+        text = apihead.strip_echo(text, prompt).strip()
         with connect() as conn:
             conn.execute(
                 """
@@ -887,6 +914,7 @@ def process_cycle(conn, state: dict) -> None:
         if cwd and fire_executor_turn(d, cwd):
             ts["triggers"] += 1
     _maybe_merge_reviews(conn)
+    _reap_closed_decision_procs(conn)
 
     save_state(state)
 
@@ -1035,12 +1063,17 @@ def _run_executor_turn(d: dict, cwd: str) -> None:
                 cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
                 **({"start_new_session": True} if os.name == "posix" else {}),
             )
+            with _procs_lock:
+                _procs[meta["token"]] = proc
             try:
                 rc = proc.wait(timeout=seat.get("exec_timeout_secs", EJECUTOR_TIMEOUT_SECS))
             except subprocess.TimeoutExpired:
                 timed_out = True
                 _kill_tree(proc)
                 rc = proc.wait()
+            finally:
+                with _procs_lock:
+                    _procs.pop(meta["token"], None)
         if timed_out or rc != 0:
             detalle = "colgado y matado" if timed_out else f"rc={rc}"
             with connect() as conn:
@@ -1208,6 +1241,42 @@ def _maybe_merge_reviews(conn) -> None:
             (rev["thread"], cuerpo),
         )
         log.info("revisión %s: %s", rev["id"], cuerpo[:80])
+
+
+
+def _reap_closed_decision_procs(conn) -> None:
+    """Sierra los procesos de cabezas o ejecutores cuya decisión ya no está
+    abierta ni ejecutando: abort del operador, o el tercer voto que cerró la
+    ronda mientras otra cabeza seguía generando (sin esto quemaba tokens
+    hasta terminar sobre una deliberación que ya había terminado)."""
+    with _procs_lock:
+        items = list(_procs.items())
+    for token, proc in items:
+        thread = token.split("::")[0]
+        if not _RE_DECISION_THREAD.match(thread):
+            continue
+        viva = conn.execute(
+            """
+            SELECT 1 FROM decisions
+            WHERE thread = %s AND status IN ('open', 'executing')
+            LIMIT 1
+            """,
+            (thread,),
+        ).fetchone()
+        if viva is not None:
+            continue
+        try:
+            _kill_tree(proc)
+        except Exception:
+            pass
+        with _procs_lock:
+            _procs.pop(token, None)
+        with _inflight_lock:
+            _inflight.discard(token)
+        log.info("proceso de %s siegado: la decisión ya no está abierta", token)
+        event("trigger_done", rc=-1, timed_out=False,
+              error="abortado: la decisión cerró", thread=thread,
+              author=token.split("::")[-1], token=token)
 
 
 if __name__ == "__main__":

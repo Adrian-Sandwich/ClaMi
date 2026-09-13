@@ -74,6 +74,9 @@ CLIENTS_LOCK = threading.Lock()
 
 def verdict_badge(d: dict) -> dict:
     """El veredicto del centro del triángulo, según el estado de la decisión."""
+    mr = d.get("minority_report") or {}
+    if mr.get("aborted"):
+        return {"text": "ABORTED", "color": "gray", "flicker": False}
     if d["status"] == "open":
         return {"text": "DELIBERATING", "color": "#ff8d00", "flicker": True}
     if d["status"] == "split" or (d["status"] == "closed" and not d["ruling"]):
@@ -88,13 +91,13 @@ def build_state(conn) -> dict:
     y la cola del journal. Recibe una conexión: testeable sin levantar HTTP."""
     open_rows = conn.execute(
         """
-        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads
+        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
         FROM decisions WHERE status = 'open' ORDER BY id
         """
     ).fetchall()
     closed_rows = conn.execute(
         """
-        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads
+        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
         FROM decisions WHERE status <> 'open' ORDER BY id DESC LIMIT %s
         """,
         (CLOSED_DECISIONS,),
@@ -151,12 +154,14 @@ def build_state(conn) -> dict:
             }
             for m in reversed(msgs_by_thread.get(r["thread"], [])[:JOURNAL_MESSAGES])
         ]
+        mr = r["minority_report"] or {}
         out.append({
             "id": r["id"], "title": r["title"], "artifact": r["artifact"],
             "protocol": r["protocol"],
             "status": r["status"], "ruling": r["ruling"],
             "confidence": r["confidence"], "round": r["round"],
             "thread": r["thread"], "badge": verdict_badge(r),
+            "aborted": bool(mr.get("aborted")),
             "seats": seats, "journal": journal,
         })
 
@@ -277,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- POST
 
     def do_POST(self) -> None:
-        if self.path not in ("/start", "/message"):
+        if self.path not in ("/start", "/message", "/abort"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -291,6 +296,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/start":
             self._start(payload)
+        elif self.path == "/abort":
+            self._abort(payload)
         else:
             self._message(payload)
 
@@ -305,6 +312,24 @@ class Handler(BaseHTTPRequestHandler):
                         protocol=payload.get("protocol") or "vote",
                     )
             self._send_json(result, 201)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, 400)
+
+    def _abort(self, payload: dict) -> None:
+        """Abortar la decisión: la cierra con flag aborted (el relay sierra
+        los procesos de las cabezas/ejecutor en su próximo ciclo)."""
+        decision_id = payload.get("decision_id")
+        if not decision_id:
+            self._send_json({"error": "falta decision_id"}, 400)
+            return
+        try:
+            with connect() as conn:
+                with conn.transaction():
+                    row = board.abort_decision(conn, int(decision_id))
+            if row is None:
+                self._send_json({"error": f"decisión {decision_id} ya estaba cerrada"}, 409)
+                return
+            self._send_json({"aborted": decision_id, "thread": row["thread"]}, 200)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, 400)
 

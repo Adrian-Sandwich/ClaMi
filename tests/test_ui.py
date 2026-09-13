@@ -12,12 +12,13 @@ import pytest
 import magi_ui
 
 
-def _decision(id, status="open", ruling=None, round=1, title="¿Ataque?"):
+def _decision(id, status="open", ruling=None, round=1, title="¿Ataque?", minority_report=None):
     return {
         "id": id, "title": title, "artifact": "/repo/auth.log",
         "protocol": "critique", "status": status, "ruling": ruling,
         "confidence": 0.66 if ruling else None, "round": round,
         "thread": f"d{id}", "heads": ["melchior", "balthasar", "casper"],
+        "minority_report": minority_report,
     }
 
 
@@ -408,3 +409,27 @@ def test_council_con_repo_y_flag_abre_decision_production(ui_server_conn):
     assert body["production"] is True
     assert started["artifact"] == "C:/src/otro-repo"
     assert started["production"] is True
+
+
+def test_badge_de_abortada_es_aborted_gris():
+    d = _decision(5, status="closed", ruling="yes", minority_report={"aborted": True})
+    assert magi_ui.verdict_badge(d)["text"] == "ABORTED"
+
+
+def test_post_abort_cierra_la_decision(ui_server_conn, monkeypatch):
+    """El botón ABORT: POST /abort cierra la decisión vía board.abort_decision
+    y reporta el thread."""
+    port, _, conn = ui_server_conn
+    conn.decisions = [_decision(2, status="open")]
+    calls = {}
+
+    def fake_abort(c, decision_id):
+        calls["id"] = decision_id
+        return {"id": decision_id, "thread": "d2", "title": "x"}
+
+    monkeypatch.setattr(magi_ui.board, "abort_decision", fake_abort)
+    resp = _post(port, "/abort", {"decision_id": 2})
+    body = json.loads(resp.read())
+    assert resp.status == 200
+    assert body == {"aborted": 2, "thread": "d2"}
+    assert calls["id"] == 2

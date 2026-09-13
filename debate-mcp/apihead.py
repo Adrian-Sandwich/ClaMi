@@ -157,3 +157,26 @@ def run_chat_turn(seat: dict, journal: list[dict]) -> str:
         seat["base_url"], seat["model"], system, user,
         seat.get("timeout_secs", DEFAULT_TIMEOUT_SECS),
     )
+
+
+def strip_echo(text: str, prompt: str | None = None) -> str:
+    """Limpia el stdout de una cabeza CLI para guardar sólo su respuesta.
+
+    Algunos CLIs en modo no interactivo imprimen el prompt completo y
+    metadatos de sesión junto a la respuesta (codex exec: banner, 'user',
+    el prompt, 'codex', la respuesta y de nuevo la respuesta tras
+    'tokens used'). El journal y el voto quieren la respuesta, no el eco:
+    sacamos el prompt si aparece verbatim, el preámbulo hasta la marca de
+    turno del asistente, y la cola desde 'tokens used'. Texto sin esas
+    marcas queda intacto.
+    """
+    out = text or ""
+    if prompt and prompt in out:
+        out = out.replace(prompt, "", 1)
+    m = re.search(r"^codex\s*$", out, re.MULTILINE)
+    if m:
+        out = out[m.end():]
+    m = re.search(r"^tokens used\b", out, re.MULTILINE)
+    if m:
+        out = out[:m.start()]
+    return out.strip()

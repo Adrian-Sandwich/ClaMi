@@ -479,3 +479,29 @@ def test_resultado_ejecucion_anuncia_la_rama():
     assert "PLAN APROBADO" in txt
     assert "magi/d7" in txt
     assert "con tests" in txt
+
+
+def test_abort_decision_marca_aborted_y_cierra():
+    """Abortar cierra con flag (no es un ruling) y deja el mensaje en el journal."""
+    import board
+
+    calls = []
+
+    class _AbortConn:
+        def __init__(self):
+            self.inserted = []
+
+        def execute(self, query, params=()):
+            q = " ".join(query.split())
+            if q.startswith("UPDATE decisions"):
+                calls.append(("update", params))
+                return _HMResult([{"id": 7, "thread": "d7", "title": "x"}])
+            if q.startswith("INSERT INTO messages"):
+                self.inserted.append(params)
+                return _HMResult([{"id": 1}])
+            raise AssertionError(f"query inesperada: {q}")
+
+    conn = _AbortConn()
+    row = board.abort_decision(conn, 7)
+    assert row["id"] == 7
+    assert conn.inserted[0][1].startswith("ABORTADA")

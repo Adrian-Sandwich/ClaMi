@@ -174,7 +174,30 @@ function render() {
   renderStatusBar(d);
   renderConversation(d);
   renderHistory();
+  const abortBtn = document.getElementById("c-abort");
+  abortBtn.hidden = !(uiMode === "council" && d && ["open", "split", "executing"].includes(d.status));
 }
+
+async function abortDecision() {
+  const d = focused();
+  if (!d) return;
+  if (!confirm(`Abort decision #${d.id}? The heads' running turns get killed. This closes it as ABORTED.`)) return;
+  const status = document.getElementById("c-status");
+  status.textContent = "aborting…";
+  try {
+    const resp = await fetch("/abort", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision_id: d.id }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    status.textContent = `decision #${d.id} aborted — running turns killed`;
+  } catch (err) {
+    status.textContent = `error: ${err.message}`;
+  }
+}
+
+document.getElementById("c-abort").addEventListener("click", abortDecision);
 
 // ------------------------------------------------------------- modal
 

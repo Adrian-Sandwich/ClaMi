@@ -403,6 +403,18 @@ body {
     color: black;
 }
 
+.composer .modes button#c-abort {
+    margin-left: auto;
+    border-color: #a41413;
+    color: #a41413;
+    background: black;
+}
+
+.composer .modes button#c-abort:hover {
+    background: #a41413;
+    color: black;
+}
+
 .composer textarea {
     width: 100%;
     box-sizing: border-box;
