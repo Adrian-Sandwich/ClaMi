@@ -597,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
                             "SELECT id, thread, status FROM decisions WHERE id = %s FOR UPDATE",
                             (int(target),),
                         ).fetchone()
-                        if d is None or d["status"] not in ("open", "split", "executing"):
+                        if d is None or d["status"] not in ("open", "split", "executing", "closed"):
                             self._send_json({"error": "La decisión seleccionada ya no admite mensajes; abrí una nueva."}, 409)
                             return
                     elif not payload.get("force_new"):
@@ -644,11 +644,15 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     else:
                         action = payload.get("action")
-                        if action is not None:
+                        if action == "followup":
+                            result = board.follow_up_decision(conn, int(d["id"]), body)
+                        elif action is not None:
                             result = board.human_message(conn, d["thread"], body, action=action)
                         else:
                             result = board.human_message(conn, d["thread"], body)
-                        if result.get("reopened_decision"):
+                        if action == "followup":
+                            result = {**result, "kind": "decision", "decision_id": d["id"], "action": "follow_up"}
+                        elif result.get("reopened_decision"):
                             result = {
                                 **result, "decision_id": result["reopened_decision"],
                                 "kind": "decision", "action": "reopened",

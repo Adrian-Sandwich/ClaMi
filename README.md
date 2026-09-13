@@ -101,8 +101,11 @@ context while it's deliberating; on a STALEMATE you explicitly choose to
 continue or close. Continue is the initial option and the buttons keep your
 text.
 
-The UI sends the selected decision's ID. If it closed before your message
-arrived, you get an error instead of having it land on another decision. On a
+The UI sends the selected decision's ID. A follow-up to a closed decision
+reopens the same dossier on its existing thread, preserving the journal and
+memory context; **New question** is the explicit way to start a separate
+decision. If a selected decision disappeared before your message arrived,
+you get an error instead of having it land on another decision. On a
 decision in execution, text adds context and **"retry"** enables the retry
 after a failure. The failure history is preserved. **New question** prepares
 another query without sending it. The send button shows **Ask council**,

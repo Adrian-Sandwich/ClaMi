@@ -310,7 +310,7 @@ function renderIntent(d) {
       txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
     }
   } else {
-    txt = "↳ Enter opens a NEW decision — this one is already closed (see HISTORY below).";
+    txt = `↳ Enter continues #${d.id} in the same thread — previous reasoning and memory stay attached. Use New question for a separate decision.`;
   }
   el.textContent = txt;
   // acciones del STALEMATE: distinguir "desacuerdo real" de "falta info".
@@ -359,6 +359,7 @@ function render() {
   const sendButton = document.getElementById("c-send");
   sendButton.textContent = sending ? "Sending…" : uiMode === "chat" ? "Send message"
     : newQuestion ? (repo ? "Start production" : "Ask council")
+    : d.status === "closed" ? "Continue this decision"
     : d.status === "split" ? (replyAction === "resume" ? "Continue discussion" : "Close with my ruling") : "Add context";
   document.getElementById("sa-segui").setAttribute("aria-pressed", String(replyAction === "resume"));
   document.getElementById("sa-ruling").setAttribute("aria-pressed", String(replyAction === "arbitrate"));
@@ -507,9 +508,10 @@ async function send(forceNew = false) {
   const payload = { mode: uiMode, body };
   const target = focused();
   if (uiMode === "council" && !forceNew) {
-    if (target && ["open", "split", "executing"].includes(target.status)) {
+    if (target && ["open", "split", "executing", "closed"].includes(target.status)) {
       payload.decision_id = target.id;
       if (target.status === "split") payload.action = replyAction;
+      if (target.status === "closed") payload.action = "followup";
     } else {
       payload.force_new = true;
     }
@@ -550,6 +552,8 @@ async function send(forceNew = false) {
       replyAction = "resume";  // la próxima split empieza en "resume"
     } else if (data.action === "context") {
       status.textContent = "context added — the heads will see it on their next turn";
+    } else if (data.action === "follow_up") {
+      status.textContent = `decision #${data.decision_id} continued — the existing journal and memory stay attached`;
     } else {
       status.textContent = "sent — the council answers in turn";
     }

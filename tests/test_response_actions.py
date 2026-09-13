@@ -25,3 +25,16 @@ def test_stale_explicit_action_cannot_silently_add_context():
     with pytest.raises(ValueError):
         board.human_message(conn, "d4", "My final ruling", action="arbitrate")
     assert conn.execute.call_count == 1
+
+
+def test_closed_follow_up_reopens_same_dossier():
+    conn = Mock()
+    conn.execute.return_value.fetchone.side_effect = [
+        {"id": 4, "thread": "d4", "status": "closed", "round": 2},
+        {"id": 10},
+    ]
+    result = board.follow_up_decision(conn, 4, "I want to examine the practical consequences")
+    assert result["decision_id"] == 4
+    assert result["thread"] == "d4"
+    queries = [call.args[0] for call in conn.execute.call_args_list]
+    assert any("SET status = 'open'" in query for query in queries)

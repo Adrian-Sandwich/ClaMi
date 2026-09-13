@@ -308,6 +308,39 @@ def human_message(conn, thread: str, body: str, action: str | None = None) -> di
     }
 
 
+def follow_up_decision(conn, decision_id: int, body: str) -> dict:
+    """Continue a closed decision on its existing thread and dossier."""
+    d = conn.execute(
+        "SELECT id, thread, status, round FROM decisions WHERE id = %s FOR UPDATE",
+        (decision_id,),
+    ).fetchone()
+    if d is None:
+        raise ValueError(f"decisión {decision_id} no existe")
+    if d["status"] != "closed":
+        raise ValueError(f"decisión {decision_id} todavía está '{d['status']}'")
+    row = conn.execute(
+        """
+        INSERT INTO messages (thread, author, kind, body, artifact)
+        VALUES (%s, 'adrian', 'contexto', %s, NULL)
+        RETURNING id
+        """,
+        (d["thread"], body),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE decisions
+        SET status = 'open', round = round + 1, ruling = NULL,
+            confidence = NULL, closed_at = NULL,
+            minority_report = COALESCE(minority_report, '{}'::jsonb) ||
+                               jsonb_build_object('follow_up', true)
+        WHERE id = %s
+        """,
+        (decision_id,),
+    )
+    return {"id": row["id"], "decision_id": decision_id,
+            "thread": d["thread"], "action": "follow_up"}
+
+
 def abort_decision(conn, decision_id: int) -> dict | None:
     """Aborta una decisión abierta, en STALEMATE o en ejecución: cierra con
     el flag 'aborted' en el dossier (no es un ruling, es un corte del

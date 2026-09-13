@@ -500,14 +500,22 @@ def test_council_usa_la_decision_seleccionada(ui_server_conn, monkeypatch, statu
     assert calls == ["d2"]
 
 
-def test_council_no_redirige_si_la_seleccionada_cerro(ui_server_conn):
-    port, started, conn = ui_server_conn
+def test_council_closed_decision_continues_same_thread(ui_server_conn, monkeypatch):
+    port, _, conn = ui_server_conn
     conn.decisions = [_decision(8), _decision(2, status="closed", ruling="yes")]
+    calls = {}
+    monkeypatch.setattr(
+        magi_ui.board, "follow_up_decision",
+        lambda c, decision_id, body: calls.update(decision_id=decision_id, body=body) or {
+            "id": 77, "decision_id": decision_id, "thread": "d2", "action": "follow_up"
+        },
+    )
     response = _post(port, "/message", {
-        "mode": "council", "body": "contexto", "decision_id": 2,
+        "mode": "council", "body": "contexto", "decision_id": 2, "action": "followup",
     })
-    assert response.status == 409
-    assert not started
+    assert response.status == 201
+    assert json.loads(response.read())["action"] == "follow_up"
+    assert calls == {"decision_id": 2, "body": "contexto"}
 
 
 def test_council_con_stalemate_arbitra(ui_server_conn, monkeypatch):
