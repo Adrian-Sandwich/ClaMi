@@ -141,13 +141,16 @@ function renderConversation(d) {
         'Switch to <b>CHAT</b> for open conversation without a vote.</div>';
     return;
   }
+  // auto-scroll SOLO si el usuario estaba leyendo el final: cada frame SSE
+  // re-renderiza, y bajar siempre el scroll no lo dejaba leer el historial.
+  const estabaAbajo = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.innerHTML = msgs.map(m => {
     const color = SEAT_COLORS[m.author] ?? "#d8d8d8";
     const who = m.author === "adrian" ? "YOU" : m.author.toUpperCase();
     return `<div class="msg"><span class="who" style="color:${color}">${esc(who)}</span>` +
            `<span class="body" style="border-color:${color}">${esc(m.body || "")}</span></div>`;
   }).join("");
-  el.scrollTop = el.scrollHeight;
+  if (estabaAbajo) el.scrollTop = el.scrollHeight;
 
   const thinking = uiMode === "chat" ? [] : thinkingSeats(d);
   if (thinking.length) {
