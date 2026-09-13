@@ -428,10 +428,11 @@ class Handler(BaseHTTPRequestHandler):
                     result = {**result, "action": result["kind"]}
                 self._send_json(result, 201)
                 return
-            # council: el sistema elige el destino por estado
+            # council: el sistema elige el destino por estado. force_new
+            # (botón NEW) salta la heurística: abre decisión nueva siempre.
             with connect() as conn:
                 with conn.transaction():
-                    d = conn.execute(
+                    d = None if payload.get("force_new") else conn.execute(
                         """
                         SELECT id, thread, status FROM decisions
                         WHERE status IN ('open', 'split')

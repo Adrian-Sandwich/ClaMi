@@ -510,3 +510,21 @@ def test_segui_con_contexto_en_open_si_es_contexto(ui_server_conn, monkeypatch):
     resp = _post(port, "/message", {"mode": "council", "body": "seguí con el parser"})
     assert resp.status == 201
     assert calls == {"thread": "d2", "body": "seguí con el parser"}
+
+
+def test_force_new_abre_decision_nueva_aunque_haya_una_abierta(ui_server_conn, monkeypatch):
+    """El botón NEW: con una decisión abierta, force_new salta la heurística
+    y abre otra nueva con el texto (en vez de mandarlo como contexto)."""
+    port, started, conn = ui_server_conn
+    conn.decisions = [_decision(2, status="open")]
+    monkeypatch.setattr(
+        magi_ui.board, "human_message",
+        lambda *a, **kw: pytest.fail("force_new no tiene que llegar a human_message"),
+    )
+    resp = _post(port, "/message", {"mode": "council", "body": "otra consulta aparte",
+                                    "force_new": True})
+    body = json.loads(resp.read())
+    assert resp.status == 201
+    assert body["action"] == "opened"
+    assert body["decision_id"] == 99
+    assert started["title"] == "otra consulta aparte"

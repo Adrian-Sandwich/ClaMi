@@ -415,6 +415,16 @@ body {
     color: black;
 }
 
+.composer .modes button#c-new {
+    border-color: #52e691;
+    color: #52e691;
+}
+
+.composer .modes button#c-new:hover {
+    background: #52e691;
+    color: black;
+}
+
 .composer textarea {
     width: 100%;
     box-sizing: border-box;

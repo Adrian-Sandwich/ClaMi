@@ -211,7 +211,22 @@ function render() {
   renderIntent(d);
   const abortBtn = document.getElementById("c-abort");
   abortBtn.hidden = !(uiMode === "council" && d && ["open", "split", "executing"].includes(d.status));
+  // NEW abre decisión nueva salteando la heurística; en CHAT no aplica
+  document.getElementById("c-new").hidden = uiMode !== "council";
 }
+
+// --- NEW: abrir una decisión NUEVA con lo que hay en la caja, aunque haya
+// otra abierta (sin esto, el council siempre mandaba el mensaje a la abierta)
+document.getElementById("c-new").addEventListener("click", async () => {
+  const input = document.getElementById("c-input");
+  const status = document.getElementById("c-status");
+  if (!input.value.trim()) {
+    status.textContent = "write the new question first — NEW sends what's in the box as a fresh decision";
+    input.focus();
+    return;
+  }
+  await send(true);
+});
 
 // --- acciones de STALEMATE: botones en vez de recordar la convención
 document.getElementById("sa-segui").addEventListener("click", async () => {
@@ -322,7 +337,7 @@ function syncModes() {
 document.querySelectorAll("#modes button").forEach(b =>
   b.addEventListener("click", () => { uiMode = b.dataset.mode; syncModes(); render(); }));
 
-async function send() {
+async function send(forceNew = false) {
   const status = document.getElementById("c-status");
   const input = document.getElementById("c-input");
   const body = input.value.trim();
@@ -334,6 +349,7 @@ async function send() {
     payload.artifact = repo;
     payload.production = true;
   }
+  if (forceNew) payload.force_new = true;
   status.textContent = "sending…";
   try {
     const resp = await fetch("/message", {
