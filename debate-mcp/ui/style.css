@@ -460,6 +460,66 @@ body {
     padding: 4px 8px;
 }
 
+.composer .prod-help {
+    color: #7a5a2e;
+    font-size: 10px;
+    flex: 2;
+}
+
+.composer .prod-help code {
+    color: #ff8d00;
+}
+
+.composer .intent {
+    color: #b0762a;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+    margin: 4px 0 6px;
+    min-height: 13px;
+}
+
+.composer .stalemate-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid #ff8d00;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+    color: #ff8d00;
+}
+
+.composer .stalemate-actions button {
+    background: black;
+    border: 2px solid #ff8d00;
+    color: #ff8d00;
+    font-family: 'Lucida Console', monospace;
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+}
+
+.composer .stalemate-actions button:hover {
+    background: #ff8d00;
+    color: black;
+}
+
+#conversation .welcome {
+    color: #7a5a2e;
+    padding: 12px 2px;
+    line-height: 1.6;
+}
+
+#conversation .welcome b {
+    color: #ff8d00;
+}
+
+#history a .h-title {
+    color: inherit;
+    opacity: 0.75;
+}
+
 .composer .prod-toggle {
     color: #7a5a2e;
     display: flex;

@@ -126,13 +126,19 @@ function renderConversation(d) {
   } else if (d) {
     msgs = d.journal ?? [];
     input.placeholder = d.status === "split"
-      ? "STALEMATE — your ruling closes it, or write 'seguí' (+ context) for another round"
+      ? "your ruling closes it, or write 'seguí' (+ context) for another round"
       : "Ask the council anything… Enter to send, Shift+Enter for a new line";
   } else {
     input.placeholder = "Ask the council anything… Enter to send, Shift+Enter for a new line";
   }
   if (!msgs.length) {
-    el.innerHTML = `<div class="empty">the council awaits — ask anything below</div>`;
+    el.innerHTML = uiMode === "chat"
+      ? '<div class="welcome">Talk to the three heads — each answers from its own angle:<br>' +
+        '<b>MELCHIOR</b> technical truth · <b>BALTHASAR</b> risk &amp; care · <b>CASPER</b> what you really want.<br>Just type below and press Enter.</div>'
+      : '<div class="welcome">This is the <b>COUNCIL</b> — ask anything and three heads investigate, ' +
+        'debate and vote:<br><b>MELCHIOR</b> what do the facts say · <b>BALTHASAR</b> who gets hurt if we\'re wrong · ' +
+        '<b>CASPER</b> what do we actually want.<br>You get a verdict with confidence and dissent. Type below and press Enter. ' +
+        'Switch to <b>CHAT</b> for open conversation without a vote.</div>';
     return;
   }
   el.innerHTML = msgs.map(m => {
@@ -156,9 +162,10 @@ function renderHistory() {
   const el = document.getElementById("history");
   const list = (state?.decisions ?? []).filter(d => d.id !== focusedId);
   if (!list.length) { el.innerHTML = ""; return; }
-  el.innerHTML = list.map(d =>
-    `<a href="#" data-id="${d.id}" style="color:${d.badge.color}">#${d.id} ${esc(d.badge.text)}</a>`
-  ).join(" · ");
+  el.innerHTML = '<span class="h-label">HISTORY&nbsp;</span>' + list.map(d =>
+    `<a href="#" data-id="${d.id}" style="color:${d.badge.color}">#${d.id} ${esc(d.badge.text)}` +
+    ` <span class="h-title">— ${esc(d.title.slice(0, 32))}${d.title.length > 32 ? "…" : ""}</span></a>`
+  ).join(" &middot; ");
   el.querySelectorAll("a").forEach(a => a.addEventListener("click", ev => {
     ev.preventDefault();
     focusedId = Number(a.dataset.id);
@@ -168,15 +175,68 @@ function renderHistory() {
   }));
 }
 
+// Qué va a pasar con el próximo Enter, en palabras. Es la respuesta a "no sé
+// qué hará mi mensaje": la UI anticipa la acción antes de que la escribas.
+function renderIntent(d) {
+  const el = document.getElementById("c-intent");
+  const prodOn = document.getElementById("c-prod-toggle").checked;
+  const repoSet = document.getElementById("c-repo").value.trim().length > 0;
+  let txt;
+  if (uiMode === "chat") {
+    txt = "↳ Enter talks to the three heads in the open thread — no vote, just their takes.";
+  } else if (!d) {
+    if (prodOn && !repoSet) {
+      txt = "↳ production is on — write the repo folder below so the executor knows where to work.";
+    } else {
+      txt = prodOn
+        ? `↳ Enter opens a PRODUCTION decision on ${document.getElementById("c-repo").value.trim()} — the council votes a plan, an executor implements it, the council reviews the diff.`
+        : "↳ Enter opens a NEW decision — the council investigates and votes. Nothing open right now.";
+    }
+  } else if (d.status === "open") {
+    txt = `↳ Enter adds CONTEXT to #${d.id} — the heads read it on their next turn (${d.round}° round).`;
+  } else if (d.status === "split") {
+    txt = `↳ Enter closes #${d.id} with YOUR ruling — or write "seguí" (+ context) to reopen the debate.`;
+  } else if (d.status === "executing") {
+    txt = `↳ Enter adds context to #${d.id} — the executor is working; the council will review the diff after.`;
+  } else {
+    txt = "↳ Enter opens a NEW decision — this one is already closed (see HISTORY below).";
+  }
+  el.textContent = txt;
+  // acciones accionables para el STALEMATE: no dejar la decisión en "y ahora qué"
+  const sa = document.getElementById("stalemate-actions");
+  sa.hidden = !(uiMode === "council" && d && d.status === "split");
+}
+
 function render() {
   const d = focused();
   renderMagi(d);
   renderStatusBar(d);
   renderConversation(d);
   renderHistory();
+  renderIntent(d);
   const abortBtn = document.getElementById("c-abort");
   abortBtn.hidden = !(uiMode === "council" && d && ["open", "split", "executing"].includes(d.status));
 }
+
+// --- acciones de STALEMATE: botones en vez de recordar la convención
+document.getElementById("sa-segui").addEventListener("click", async () => {
+  const input = document.getElementById("c-input");
+  input.value = "seguí";
+  await send();
+});
+document.getElementById("sa-ruling").addEventListener("click", () => {
+  const input = document.getElementById("c-input");
+  input.placeholder = "your ruling and why — Enter closes the decision";
+  input.focus();
+});
+
+// --- toggle production: el repo y la explicación sólo aparecen cuando aplica
+document.getElementById("c-prod-toggle").addEventListener("change", ev => {
+  const on = ev.target.checked;
+  document.getElementById("c-repo").hidden = !on;
+  document.getElementById("prod-help").hidden = !on;
+  render();
+});
 
 async function abortDecision() {
   const d = focused();
@@ -232,10 +292,11 @@ async function send() {
   if (!body) return;
   const payload = { mode: uiMode, body };
   // producción: repo + flag viajan con la consulta que abre la decisión
+  const prodOn = document.getElementById("c-prod-toggle").checked;
   const repo = document.getElementById("c-repo").value.trim();
-  if (uiMode === "council" && repo) {
+  if (uiMode === "council" && prodOn && repo) {
     payload.artifact = repo;
-    payload.production = document.getElementById("c-prod").checked;
+    payload.production = true;
   }
   status.textContent = "sending…";
   try {
