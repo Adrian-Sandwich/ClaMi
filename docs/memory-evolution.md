@@ -96,12 +96,32 @@ proyecto con la misma garantía que las decisiones que sí lo especifican.
 
 Referencia del proveedor: https://qdrant.github.io/fastembed/examples/Supported_Models/
 
-## Paso 4: síntesis conjunta
+## Paso 4: síntesis conjunta (implementado)
 
-Producir una respuesta breve revisada por las tres cabezas, distinguiendo acuerdos,
-desacuerdos y preguntas pendientes. Unanimidad de etiquetas INFO no demuestra
-consenso sobre el contenido ni certeza. Evaluar convergencia dentro de un presupuesto
-de ciclos; conservar el journal como detalle consultable.
+El relay prepara una respuesta conjunta para el dossier cerrado, dividido o en
+ejecución que recibió actividad más recientemente. No procesa automáticamente todo
+el historial. Un asiento redacta y cada asiento esperado revisa la fidelidad de
+la síntesis a las fuentes. Puede corregirse y revisarse una segunda vez: máximo
+dos ciclos, ocho invocaciones con tres asientos, 120 segundos por invocación.
+
+La interfaz presenta respuesta, puntos compartidos, diferencias y preguntas
+pendientes. Un borrador que no obtuvo todas las revisiones favorables se marca
+como parcial y muestra las objeciones o revisiones que no pudieron completarse.
+Validar la fidelidad editorial no significa compartir las otras posturas. El
+porcentaje de votos se etiqueta como acuerdo de voto, no certeza factual.
+Los triángulos permanecen; los registros y aportes completos son detalle opcional.
+
+La síntesis se guarda en el dossier, con fuentes, revisiones y versión del journal.
+Si cambia el contexto o la ronda durante la redacción, no se publica el resultado
+obsoleto. Un candado de Postgres impide trabajo duplicado entre relays. Reiniciar
+recupera un trabajo interrumpido; un resultado parcial o fallido no se reintenta
+indefinidamente sin nuevo contexto. El proceso editorial no modifica votos,
+aprobaciones ni la ejecución de producción.
+
+Límite actual: se incluyen las posiciones de la última ronda (hasta 3500 caracteres
+por aporte) y tres intervenciones humanas recientes. La síntesis puede omitir
+matices fuera de ese contexto. La convergencia semántica del debate original sigue
+pendiente: este paso revisa la respuesta final, no sustituye el motor de rondas.
 
 ## Paso 5: aprender de resultados
 

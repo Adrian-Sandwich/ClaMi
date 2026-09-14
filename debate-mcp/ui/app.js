@@ -152,7 +152,7 @@ function renderStatusBar(d) {
     return;
   }
   if (!d) { el.textContent = "MAGI SYSTEM — STANDBY"; return; }
-  const conf = d.confidence != null ? ` · CONFIDENCE ${d.confidence}` : "";
+  const conf = d.confidence != null ? ` · VOTE AGREEMENT ${Math.round(Number(d.confidence) * 100)}%` : "";
   el.textContent = `#${d.id} ${d.badge.text}${conf} — ${d.title}`;
 }
 
@@ -179,6 +179,8 @@ function renderSummary(d) {
   const meta = document.getElementById("summary-meta");
   const conditions = document.getElementById("summary-conditions");
   const seats = document.getElementById("summary-seats");
+  const content = document.getElementById("summary-content");
+  content.replaceChildren();
   if (!d) {
     card.classList.add("empty"); title.textContent = "No decision selected";
     lead.textContent = "Ask a question to get a readable conclusion from all three heads.";
@@ -189,13 +191,39 @@ function renderSummary(d) {
   const voted = (d.seats || []).filter(s => s.voted);
   const counts = voted.reduce((out, s) => { out[s.position] = (out[s.position] || 0) + 1; return out; }, {});
   const voteLine = voted.length ? Object.entries(counts).map(([position, count]) => `${count} ${position}`).join(" · ") : "No votes yet";
-  const confidence = d.confidence == null ? "confidence pending" : `${Math.round(Number(d.confidence) * 100)}% confidence`;
+  const confidence = d.confidence == null ? "votes pending" : `${Math.round(Number(d.confidence) * 100)}% vote agreement`;
   meta.textContent = `${voteLine}  ·  ${confidence}  ·  round ${d.round}`;
   lead.textContent = d.status === "open"
     ? `${voted.length} of ${(d.seats || []).length} heads have answered. The synthesis will settle when the round closes.`
     : d.status === "split" ? "The perspectives do not converge. Read the three reasons below, then choose how to continue."
-    : d.ruling === "info" ? "The council classified this as an open question, not an approve/reject decision. The useful answer is below; the raw journal is optional."
-    : "This is the council’s combined outcome. Open a head below only when you need the detailed reasoning.";
+    : "La respuesta conjunta todavía no está disponible para esta conversación. Los aportes completos están disponibles abajo.";
+  const synthesis = d.synthesis;
+  if (synthesis && ["reviewed", "partial"].includes(synthesis.status)) {
+    lead.textContent = synthesis.answer;
+    const approved = (synthesis.reviews || []).filter(r => r.approve).length;
+    meta.textContent += ` · Revisión de fidelidad: ${approved}/${(synthesis.reviews || []).length} · ciclo ${synthesis.cycle}/2`;
+    for (const [key, label] of [["agreements", "Puntos compartidos"], ["differences", "Diferencias"], ["open_questions", "Qué falta resolver"]]) {
+      if (!(synthesis[key] || []).length) continue;
+      const section = document.createElement("section");
+      const heading = document.createElement("strong"); heading.textContent = label; section.append(heading);
+      const list = document.createElement("ul");
+      for (const text of synthesis[key]) { const item = document.createElement("li"); item.textContent = text; list.append(item); }
+      section.append(list); content.append(section);
+    }
+    if (synthesis.status === "partial") {
+      title.textContent += " · Borrador sin validación completa";
+      const note = document.createElement("p");
+      note.textContent = "Borrador: no todas las cabezas validaron esta síntesis tras dos ciclos.";
+      content.prepend(note);
+      for (const review of (synthesis.reviews || []).filter(r => !r.approve)) {
+        const item = document.createElement("p"); item.textContent = `${review.seat}: ${review.feedback}`; content.append(item);
+      }
+    }
+  } else if (synthesis?.status === "error") {
+    lead.textContent = "No se pudo preparar la síntesis. Las aportaciones están conservadas; podés continuar esta conversación.";
+  } else if (synthesis?.status === "generating") {
+    lead.textContent = "El consejo está redactando y revisando la respuesta conjunta…";
+  }
   const allConditions = [...new Set((d.seats || []).flatMap(s => s.conditions || []))];
   conditions.hidden = !allConditions.length;
   conditions.innerHTML = allConditions.length
@@ -205,7 +233,7 @@ function renderSummary(d) {
     const position = s.voted ? String(s.position).toUpperCase() : "THINKING";
     return `<button class="summary-seat" data-seat="${esc(s.seat)}" style="--seat-color:${color}" aria-label="Read ${esc(s.seat)} reasoning">
       <span class="summary-seat-name">${esc(s.seat.toUpperCase())}</span><span class="summary-seat-vote">${esc(position)}</span>
-      <span class="summary-seat-body">${esc(shortReason(s.body))}</span></button>`;
+      <span class="summary-seat-body">${s.voted ? "Ver aportación completa" : "Esperando aportación"}</span></button>`;
   }).join("");
   seats.querySelectorAll(".summary-seat").forEach(button => {
     const seat = (d.seats || []).find(s => s.seat === button.dataset.seat);

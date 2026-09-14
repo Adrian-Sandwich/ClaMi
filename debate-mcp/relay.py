@@ -73,6 +73,7 @@ import apihead  # noqa: E402
 import board  # noqa: E402
 import memory_ctx  # noqa: E402
 import memory_sync  # noqa: E402
+import council_synthesis  # noqa: E402
 import decision  # noqa: E402
 import heads  # noqa: E402
 import personas  # noqa: E402
@@ -1040,9 +1041,49 @@ def process_cycle(conn, state: dict) -> None:
     save_state(state)
 
 
+def _synthesis_invoke(seat, prompt):
+    prompt = apihead._persona(seat['seat']) + '\n\n' + prompt
+    token = 'synthesis:' + seat['seat']
+    with _inflight_lock:
+        _inflight.add(token)
+    try:
+        if seat.get('type') == 'api':
+            return apihead.chat(seat['base_url'], seat['model'], apihead._persona(seat['seat']), prompt, 120)
+        with tempfile.TemporaryDirectory(prefix='magi-editor-') as cwd:
+            if seat.get('journal') == 'inline':
+                config = dict(seat, args=list(seat.get('args', [])))
+                if 'exec' in config['args']:
+                    final = Path(cwd) / 'final.txt'
+                    config['args'] += ['--skip-git-repo-check', '--sandbox', 'read-only', '--output-last-message', str(final)]
+                    _run_cli_inline(config, prompt, cwd, 120, token=token)
+                    return final.read_text(encoding='utf-8')
+                return _run_cli_inline(config, prompt, cwd, 120, token=token)
+            out = Path(cwd) / 'result.txt'
+            with out.open('wb') as stream:
+                proc = subprocess.Popen([seat['bin'], *seat.get('args', []), prompt], cwd=cwd,
+                    stdout=stream, stderr=subprocess.STDOUT,
+                    **({'start_new_session': True} if os.name == 'posix' else {'creationflags': subprocess.CREATE_NO_WINDOW}))
+                with _procs_lock:
+                    _procs[token] = proc
+                try:
+                    if proc.wait(timeout=120) != 0:
+                        raise RuntimeError('Synthesis provider failed')
+                except subprocess.TimeoutExpired:
+                    _kill_tree(proc)
+                    proc.wait()
+                    raise
+            return out.read_text(encoding='utf-8', errors='replace')
+    finally:
+        with _inflight_lock:
+            _inflight.discard(token)
+        with _procs_lock:
+            _procs.pop(token, None)
+
+
 def main() -> None:
     state = load_state()
     memory_sync.sync.start()
+    council_synthesis.start(_synthesis_invoke)
     log.info("relay arrancando, last_id=%s", state["last_id"])
     backoff = 1
 

@@ -553,7 +553,10 @@ body {
 .summary-card.empty { border-color: #69451f; }
 .summary-heading { display: flex; justify-content: space-between; gap: 12px; color: #ff8d00; font-size: 11px; letter-spacing: .12em; }
 .summary-card h2 { color: #ffe0ae; font-family: 'Lucida Console', monospace; font-size: clamp(19px, 3vw, 30px); line-height: 1.2; margin: 10px 0 7px; }
-.summary-lead { color: #e6d3b7; line-height: 1.55; margin: 0 0 10px; max-width: 78ch; }
+.summary-lead { color: #e6d3b7; line-height: 1.55; margin: 0 0 10px; max-width: 78ch; white-space: pre-line; }
+#summary-content { color: #e6d3b7; line-height: 1.55; max-width: 78ch; }
+#summary-content section { margin-top: 12px; }
+#summary-content ul { padding-left: 22px; margin: 5px 0; }
 .summary-meta { color: #ffb454; font-size: 12px; letter-spacing: .04em; }
 .summary-conditions { border-left: 3px solid #52e691; color: #bfe9ca; line-height: 1.5; margin-top: 12px; padding: 7px 10px; }
 .summary-seats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }

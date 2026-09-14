@@ -137,13 +137,15 @@ def build_state(conn) -> dict:
     y la cola del journal. Recibe una conexión: testeable sin levantar HTTP."""
     open_rows = conn.execute(
         """
-        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
+        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report,
+               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version
         FROM decisions WHERE status IN ('open', 'split', 'executing') ORDER BY id
         """
     ).fetchall()
     closed_rows = conn.execute(
         """
-        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report
+        SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report,
+               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version
         FROM decisions WHERE status = 'closed' ORDER BY id DESC LIMIT %s
         """,
         (CLOSED_DECISIONS,),
@@ -208,6 +210,9 @@ def build_state(conn) -> dict:
             for m in reversed(msgs_by_thread.get(r["thread"], [])[:JOURNAL_MESSAGES])
         ]
         mr = r["minority_report"] or {}
+        synthesis = mr.get('synthesis')
+        if synthesis and synthesis.get('source') != {'round': r['round'], 'status': r['status'], 'message_id': r.get('journal_version')}:
+            synthesis = None
         out.append({
             "id": r["id"], "title": r["title"], "artifact": r["artifact"],
             "protocol": r["protocol"],
@@ -216,6 +221,7 @@ def build_state(conn) -> dict:
             "thread": r["thread"], "badge": verdict_badge(r),
             "aborted": bool(mr.get("aborted")),
             "execution_state": mr.get("execution_state"),
+            "synthesis": synthesis,
             "seats": seats, "journal": journal,
         })
 

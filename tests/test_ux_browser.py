@@ -46,6 +46,23 @@ def feed(page, value):
     page.evaluate("data => window.feed.onmessage({data: JSON.stringify(data)})", value)
 
 
+def test_joint_answer_replaces_transcript_and_marks_partial_review(page):
+    data = snapshot('closed')
+    d = data['decisions'][0]
+    for seat in d['seats']:
+        seat.update(voted=True, position='info', body='exec PRIVATE RAW LOG')
+    d['synthesis'] = {'status': 'partial', 'answer': 'Una respuesta conjunta <script>literal</script>',
+        'agreements': ['Coincidimos en cuidar los datos'], 'differences': ['Falta acordar el plazo'],
+        'open_questions': [], 'cycle': 2,
+        'reviews': [{'seat':'casper','approve':False,'feedback':'Falta justificar el costo'}]}
+    feed(page, data)
+    assert page.locator('#summary-lead').inner_text() == d['synthesis']['answer']
+    assert 'PRIVATE RAW LOG' not in page.locator('#summary-card').inner_text()
+    assert 'no todas las cabezas' in page.locator('#summary-content').inner_text()
+    assert page.locator('#summary-content script').count() == 0
+    assert page.locator('#detail-panel').get_attribute('open') is None
+
+
 def test_composer_targets_actions_and_preserves_failed_drafts(page):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
