@@ -5,6 +5,12 @@
       "command": "./debate-mcp/.venv/Scripts/python.exe",
       "args": ["./debate-mcp/server.py"],
       "env": {}
+    },
+    "codebase-memory": {
+      "type": "stdio",
+      "command": "C:/Users/Adrian/AppData/Local/Programs/codebase-memory-mcp/codebase-memory-mcp.exe",
+      "args": [],
+      "env": {}
     }
   }
 }

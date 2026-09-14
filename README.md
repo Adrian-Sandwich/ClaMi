@@ -65,7 +65,12 @@ Then open **http://127.0.0.1:8051**.
 **Registering the MCP in your agents** (so CLI heads can see the board): the
 repo ships `.mcp.json` at the root — any agent running from the repo loads it
 automatically (on Windows it points to `.venv/Scripts/python.exe`; on
-macOS/Linux change it to `bin/python`). For a global config, your agent
+macOS/Linux change it to `bin/python`). The same file also ships the
+`codebase-memory` server: local structural code intelligence — search, trace,
+architecture and dead-code queries over this repo. The first session indexes
+the repo once, then it keeps itself fresh; no API key and no data leaves the
+machine. Its command points to a local install path, so adjust it if cbm
+lives elsewhere on your machine. For a global config, your agent
 usually has a command like `kimi mcp add` / `claude mcp add` pointing at
 `debate-mcp/server.py` with the venv's python.
 
@@ -244,10 +249,11 @@ needed: the new data lives in the existing JSON dossier.
   repo's MCP (like kimi/claude), it votes with `cast_position`. `"journal":
   "inline"` is for CLIs that don't load MCP (codex exec): the relay inlines
   the journal into the prompt and parses the `POSITION:` tag from stdout. Pin
-  the model in `args` when your provider supports explicit model selection. The
-  checked-in Codex seats use `"args": ["exec"]`, which lets the authenticated
-  Codex account choose its supported default model instead of hard-coding a
-  model unavailable to ChatGPT-account sessions.
+  the model in `args` when your provider supports explicit model selection —
+  e.g. codex: `"args": ["exec", "-m", "gpt-5.6-luna"]` for the fast/affordable
+  tier. Which models your account supports depends on the provider
+  (`codex debug models` lists the catalog; the checked-in seats deliberately
+  use plain `"args": ["exec"]` so the account default applies).
   without a flag it uses your CLI's default.
 - **type `api`**: POST to an OpenAI-compatible endpoint (Ollama, LM Studio,
   llama.cpp). The journal is inlined; same vote contract.
