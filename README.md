@@ -76,6 +76,18 @@ once (ingests your agents' sessions, decisions and READMEs into
 macOS/Linux: cron or launchd). Without the graph the system works, but the
 heads remember nothing.
 
+The relay also syncs conversations and decisions into the graph continuously
+(the heartbeat and `healthcheck.py` show the last sync). Retrieval is
+keyword-based by default; **semantic retrieval** (local multilingual
+embeddings — no text leaves the machine) is optional: install it once with
+`debate-mcp/.venv/bin/pip install -r debate-mcp/requirements-semantic.txt`
+and `debate-mcp/.venv/bin/python debate-mcp/semantic_memory.py --download`
+(model goes to `memory-graph/models/`). `MEMORY_SEMANTIC=0` disables it;
+without the model the system falls back to keyword search. Explicit
+declarations you write in chat (`Objetivo: …`, `Restricción [datos]: …`,
+`Pendiente [pruebas]: …`) are kept per conversation as sourced, versioned
+facts.
+
 System status at any time: `.venv/bin/python healthcheck.py`.
 
 ## How you use it (the web, in 30 seconds)
@@ -147,6 +159,24 @@ Each decision has a number: `#12`. The chips at the bottom are your
 conversation. The color is the verdict: green APPROVED, red REJECTED, orange
 CONDITIONAL, blue INFO, gray STALEMATE. `#4 CONDITIONAL` means "decision 4
 closed with conditions".
+
+### Synthesis and outcomes
+
+For the most recently active closed, split or executing decision, the relay
+prepares a **joint synthesis**: one head drafts the answer and every expected
+head reviews it for fidelity to the sources (up to two correction cycles).
+The UI shows the answer, shared points, differences and open questions; a
+draft that didn't clear every review is marked **partial** with the
+outstanding objections. The vote percentage is labeled as vote agreement,
+not factual certainty.
+
+**¿Cómo salió?** lets you record how a decision turned out — worked, failed,
+partial or unconfirmed — with an observation, an evidence reference and an
+optional learning. Reports stay on the decision (it never reopens, never
+re-arms executions), sync to the memory graph, and new context flags when
+earlier reports disagreed.
+
+The memory roadmap and its known limits live in `docs/memory-evolution.md`.
 
 ### Switching repo or working folder
 
@@ -272,6 +302,10 @@ board's tables. Without that variable they're skipped.
 
 ## Operational notes
 
+- The web UI requires a **per-session token** (printed at startup by
+  `magi_ui.py`) on every endpoint except the index page — any local process
+  without it gets 403. After a restart, reload open browser tabs to pick up
+  the new token.
 - Connecting to another database/server: `DEBATE_CONNINFO` (standard libpq
   conninfo). The default pins no user: it uses the OS user.
 - The UI and the relay take as long as the heads take: cloud models
