@@ -162,7 +162,7 @@ def test_info_unanime_exige_una_ronda_de_contraste():
     assert act["action"] == "next_round"
     assert decision.advance({**d, "round": 2}, first + [
         mk_pos(s, "info", round=2) for s in SEATS
-    ])["action"] == "close"
+    ])["action"] == "assess_content"
 
 
 def test_adaptive_con_split_abre_critique():

@@ -74,6 +74,16 @@ def test_draft_visible_while_head_review_is_pending(page):
     assert 'melchior' in page.locator('#summary-content').inner_text()
 
 
+def test_editorial_approval_does_not_hide_unresolved_content(page):
+    data=snapshot('closed')
+    data['decisions'][0]['synthesis']={'status':'reviewed','answer':'Respuesta con desacuerdos',
+        'cycle':1,'reviews':[],'agreements':[],'differences':[],'open_questions':[],
+        'content_state':'budget_exhausted','content_consensus':False}
+    feed(page,data)
+    assert 'Sin consenso de contenido' in page.locator('#summary-title').inner_text()
+    assert 'se agotaron las rondas' in page.locator('#summary-content').inner_text()
+
+
 def test_outcome_retry_preserves_report_and_request_identity(page):
     feed(page,snapshot('closed'))
     page.locator('#outcome-panel summary').click()

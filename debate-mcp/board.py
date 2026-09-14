@@ -175,6 +175,9 @@ def record_position(
                  }),
                  decision_id),
             )
+    elif act["action"] == "assess_content":
+        conn.execute("""UPDATE decisions SET minority_report = COALESCE(minority_report,'{}'::jsonb) || %s::jsonb
+            WHERE id=%s""", (Json({'content_check': {'state': 'pending', 'round': d['round']}}),decision_id))
     elif act["action"] == "next_round":
         conn.execute(
             "UPDATE decisions SET round = %s WHERE id = %s",
@@ -298,7 +301,9 @@ def human_message(conn, thread: str, body: str, action: str | None = None) -> di
     elif kind == "contexto" and d is not None and d["status"] == "split":
         # destrabe: nueva ronda, las cabezas recastan con el contexto nuevo
         conn.execute(
-            "UPDATE decisions SET status = 'open', round = %s WHERE id = %s",
+            """UPDATE decisions SET status = 'open', round = %s,
+                minority_report=COALESCE(minority_report,'{}'::jsonb) || jsonb_build_object('round_budget_start',round+1)
+                WHERE id = %s""",
             (d["round"] + 1, d["id"]),
         )
         reopened = d["id"]
@@ -332,7 +337,7 @@ def follow_up_decision(conn, decision_id: int, body: str) -> dict:
         SET status = 'open', round = round + 1, ruling = NULL,
             confidence = NULL, closed_at = NULL,
             minority_report = COALESCE(minority_report, '{}'::jsonb) ||
-                               jsonb_build_object('follow_up', true)
+                               jsonb_build_object('follow_up', true, 'round_budget_start', round+1)
         WHERE id = %s
         """,
         (decision_id,),

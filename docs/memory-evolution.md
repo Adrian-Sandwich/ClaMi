@@ -124,8 +124,12 @@ aprobaciones ni la ejecución de producción.
 
 Límite actual: se incluyen las posiciones de la última ronda (hasta 3500 caracteres
 por aporte) y tres intervenciones humanas recientes. La síntesis puede omitir
-matices fuera de ese contexto. La convergencia semántica del debate original sigue
-pendiente: este paso revisa la respuesta final, no sustituye el motor de rondas.
+matices fuera de ese contexto. El cierre INFO ahora espera aceptación explícita
+del contenido de una misma respuesta; una revisión fiel puede rechazar sus
+conclusiones. Las objeciones alimentan la siguiente ronda, hasta tres rondas por
+continuación humana. Al agotarse el presupuesto, o faltar una revisión válida,
+se entrega una respuesta provisional. Es acuerdo declarado por los modelos,
+no una prueba de verdad factual ni una medida infalible de calidad.
 
 ## Paso 5: aprender de resultados (implementado)
 
@@ -148,8 +152,20 @@ No se deducen causas de fallos automáticamente: el detalle registrado y la evid
 siguen siendo necesarios. Esto mejora la memoria; no reentrena los modelos ni
 demuestra por sí solo una mejora global en la calidad de sus respuestas.
 
-## Paso 6: medir la mejora
+## Paso 6: medir la mejora (base de evaluación implementada)
 
-Mantener casos de evaluación de continuidad, recuperación, contradicciones,
-síntesis y utilidad. Medir aciertos, contaminación entre proyectos, latencia y
-costo. Promover cambios sólo si mejoran esos resultados frente a la versión anterior.
+`tests/test_content_consensus.py` evalúa aceptación frente a mera fidelidad,
+objeciones, revisiones faltantes, presupuesto renovado por continuación y el
+recorrido transaccional INFO → respuesta común → corrección/cierre. Postgres usa
+tablas temporales aisladas. Complementa los casos de recuperación semántica,
+resultados observados y el timeout de la #26.
+
+```powershell
+$env:CLAMI_TEST_POSTGRES_DSN = 'dbname=debate host=localhost'
+.\debate-mcp\.venv\Scripts\python.exe -m pytest tests/test_content_consensus.py tests/test_council_synthesis.py tests/test_memory_retrieval.py tests/test_outcomes.py -q
+```
+
+Estas evaluaciones prueban comportamiento, no que los modelos razonen mejor en
+general. Siguen pendientes un conjunto independiente de conversaciones calificadas
+por el usuario, mediciones continuas de latencia/costo y una comparación longitudinal
+de utilidad. La evaluación semántica pequeña del paso 3 sigue siendo de desarrollo.

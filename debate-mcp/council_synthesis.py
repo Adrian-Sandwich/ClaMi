@@ -7,6 +7,7 @@ import time
 from psycopg.types.json import Jsonb
 from config import connect
 import heads
+import decision
 
 log = logging.getLogger(__name__)
 MAX_CYCLES = 2
@@ -27,7 +28,8 @@ def parse(text, review=False):
             continue
         if review:
             if type(value.get('approve')) is bool and isinstance(value.get('feedback'), str):
-                candidates.append({'approve': value['approve'], 'feedback': value['feedback'][:1200]})
+                candidates.append({'approve': value['approve'], 'feedback': value['feedback'][:1200],
+                                   'accept_answer': value.get('accept_answer') if type(value.get('accept_answer')) is bool else None})
         elif (isinstance(value.get('answer'), str) and 1 <= len(value['answer'].strip()) <= 2400
               and all(isinstance(value.get(k), list) and len(value[k]) <= 5
                       and all(isinstance(x, str) and len(x) <= 500 for x in value[k])
@@ -54,7 +56,8 @@ def compose(bundle, seats, invoke, progress=lambda result: None):
             'Distingue lo que sostienen las fuentes de lo que no está demostrado.\nFUENTES:\n' + context)
     feedback = []
     draft = None
-    for cycle in range(1, MAX_CYCLES + 1):
+    cycles = 1 if bundle.get('content_check') else MAX_CYCLES
+    for cycle in range(1, cycles + 1):
         prompt = base + '\nRedactá una respuesta directa de hasta 180 palabras que integre las perspectivas. '
         prompt += 'Devolvé sólo JSON: {"answer":"...","agreements":[],"differences":[],"open_questions":[]}.'
         if feedback:
@@ -77,7 +80,11 @@ def compose(bundle, seats, invoke, progress=lambda result: None):
                 continue
             prompt = base + '\nRevisá si este borrador representa fielmente TU aporte, conserva los desacuerdos '
             prompt += 'y evita afirmaciones no sustentadas. Aprobar fidelidad no significa adoptar las otras posturas. '
-            prompt += 'Devolvé sólo JSON: {"approve":true o false,"feedback":"corrección concreta si hace falta"}.\n'
+            prompt += ('Evaluá por separado si aceptás el contenido del borrador como respuesta común '
+                       'a la pregunta: accept_answer=true sólo si no quedan objeciones sustantivas desde tu eje. '
+                       'La fidelidad a tu aporte NO equivale a aceptar las conclusiones. No aceptes sólo por votar INFO. '
+                       'Si no aceptás, explicá qué afirmación cambiar y por qué. '
+                       'Devolvé sólo JSON con los campos approve (boolean), accept_answer (boolean), feedback (texto).\n')
             prompt += json.dumps(draft, ensure_ascii=False)
             try:
                 review = parse(invoke(available[name], prompt), review=True)
@@ -93,7 +100,43 @@ def compose(bundle, seats, invoke, progress=lambda result: None):
             return dict(draft, status='partial', cycle=cycle, reviews=reviews,
                         stop_reason='review_unavailable')
         feedback = reviews
-    return dict(draft, status='partial', cycle=MAX_CYCLES, reviews=reviews)
+    return dict(draft, status='partial', cycle=cycles, reviews=reviews)
+
+
+def finish_content(conn, identifier, version, result):
+    with conn.transaction():
+        conn.execute('SELECT id FROM decisions WHERE id=%s FOR UPDATE', (identifier,))
+        d, current = snapshot(conn, identifier)
+        if current != version or d['status'] != 'open':
+            return False
+        resolution = decision.content_resolution(d['round'],d['heads'],result.get('reviews',[]),
+                     round_start=(d.get('minority_report') or {}).get('round_budget_start',1))
+        if resolution == 'next_round':
+            context = 'Respuesta común propuesta para corregir en la próxima ronda:\n' + result.get('answer','')
+            conn.execute("INSERT INTO messages(thread,author,kind,body) VALUES (%s,'magi','contexto',%s)", (d['thread'],context))
+            for review in result.get('reviews',[]):
+                if not review.get('accept_answer') or not review.get('approve'):
+                    conn.execute("INSERT INTO messages(thread,author,kind,body) VALUES (%s,'magi','contexto',%s)",
+                                 (d['thread'],f"Objeción de {review['seat']}: {review['feedback']}\nRespondan a esta objeción y propongan una respuesta común corregida."))
+            conn.execute("UPDATE decisions SET round=round+1,minority_report=COALESCE(minority_report,'{}'::jsonb) || %s WHERE id=%s",
+                         (Jsonb({'content_check':{'state':'revising','round':d['round']+1}}),identifier))
+        else:
+            check = {'state':resolution,'round':d['round']}
+            votes = conn.execute('SELECT head,round,position,conditions FROM positions WHERE decision_id=%s', (identifier,)).fetchall()
+            vote_result = decision.resolve_votes(d,votes) or {}
+            check_data = {'content_check':check, 'minority':vote_result.get('minority',[]),
+                          'degraded':vote_result.get('degraded',True), 'mind_changes':decision.mind_changes(votes)}
+            conn.execute("""UPDATE decisions SET status='closed',ruling='info',confidence=%s,closed_at=now(),
+                minority_report=COALESCE(minority_report,'{}'::jsonb) || %s WHERE id=%s""",
+                         (vote_result.get('confidence',0),Jsonb(check_data),identifier))
+            label = {'consensus':'Respuesta común aceptada por todas las cabezas.',
+                     'budget_exhausted':'Respuesta provisional: se agotaron las rondas sin acuerdo sobre el contenido.',
+                     'unavailable':'Respuesta provisional: no se pudo verificar el acuerdo sobre el contenido.'}[resolution]
+            conn.execute("INSERT INTO messages(thread,author,kind,body) VALUES (%s,'magi','resultado',%s)", (d['thread'],label))
+        _, updated = snapshot(conn,identifier)
+        result = dict(result, content_consensus=resolution == 'consensus', content_state=resolution)
+        # The round's draft remains visible while the next round addresses it.
+        return save(conn,identifier,updated,result)
 
 
 def snapshot(conn, identifier):
@@ -119,8 +162,8 @@ def run_latest(invoke, retry=False):
     # Process the most recently active dossier, not an expensive history backfill.
     with connect() as conn:
         row = conn.execute("""SELECT d.id FROM decisions d
-            WHERE status IN ('closed','split','executing')
-            ORDER BY (SELECT max(id) FROM messages WHERE thread=d.thread) DESC NULLS LAST LIMIT 1""").fetchone()
+            WHERE status IN ('closed','split','executing') OR (status='open' AND minority_report->'content_check'->>'state'='pending')
+            ORDER BY (status='open') DESC, (SELECT max(id) FROM messages WHERE thread=d.thread) DESC NULLS LAST LIMIT 1""").fetchone()
         if not row:
             return
         identifier = row['id']
@@ -128,8 +171,9 @@ def run_latest(invoke, retry=False):
             return
         try:
             d, version = snapshot(conn, identifier)
+            checking = d['status'] == 'open' and (d.get('minority_report') or {}).get('content_check',{}).get('state') == 'pending'
             previous = (d.get('minority_report') or {}).get('synthesis', {})
-            if not retry and previous.get('source') == version and previous.get('status') in ('reviewed','partial','error'):
+            if not checking and not retry and previous.get('source') == version and previous.get('status') in ('reviewed','partial','error'):
                 return
             votes = conn.execute('''SELECT p.head,p.position,p.conditions,p.message_id,m.body
                 FROM positions p JOIN messages m ON m.id=p.message_id
@@ -138,6 +182,7 @@ def run_latest(invoke, retry=False):
                 return
             context = conn.execute("SELECT id,body FROM messages WHERE thread=%s AND author='adrian' ORDER BY id DESC LIMIT 3", (d['thread'],)).fetchall()
             bundle = {'question': d['title'], 'heads': d['heads'], 'ruling': d['ruling'],
+                      'content_check': checking,
                       'human_context': [dict(id=m['id'],body=m['body'][-2000:]) for m in reversed(context)],
                       'contributions': [dict(v, body=(v['body'] or '')[-3500:]) for v in votes]}
             save(conn,identifier,version,{'status':'generating'})
@@ -148,7 +193,10 @@ def run_latest(invoke, retry=False):
             except Exception as exc:
                 log.warning('Synthesis %s failed (%s)',identifier,type(exc).__name__)
                 result = {'status':'error'}
-            save(conn,identifier,version,result)
+            if checking:
+                finish_content(conn,identifier,version,result)
+            else:
+                save(conn,identifier,version,result)
         finally:
             conn.execute('SELECT pg_advisory_unlock(72831,%s)', (identifier,))
 

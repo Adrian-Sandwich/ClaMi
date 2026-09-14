@@ -138,7 +138,8 @@ def advance(decision: dict, positions: list[dict]) -> dict:
         return {"action": "wait"}
     rp = round_positions(positions, decision["round"])
     all_info = bool(rp) and all(p["position"] == "info" for p in rp)
-    if all_info and decision["round"] < INFO_MIN_ROUNDS:
+    rounds_used = decision['round'] - (decision.get('minority_report') or {}).get('round_budget_start', 1) + 1
+    if all_info and rounds_used < INFO_MIN_ROUNDS:
         return {
             "action": "next_round",
             "minority": [
@@ -146,17 +147,35 @@ def advance(decision: dict, positions: list[dict]) -> dict:
                 for p in rp
             ],
         }
+    if all_info:
+        return {'action': 'assess_content'}
     res = resolve_votes(decision, positions)
     if res is not None:
+        if res['ruling'] == 'info':
+            return {'action': 'assess_content'}
         return {"action": "close", **res}
 
     minority = [
         {"head": p["head"], "position": p["position"], "conditions": p.get("conditions")}
         for p in rp
     ]
-    if decision["protocol"] == "vote" or decision["round"] >= MAX_ROUNDS:
+    if decision["protocol"] == "vote" or rounds_used >= MAX_ROUNDS:
         return {"action": "split", "minority": minority}
     return {"action": "next_round", "minority": minority}
+
+
+def content_resolution(round_, expected, reviews, round_start=1):
+    """Editorial fidelity alone cannot authorize a shared INFO answer."""
+    by_head = {r['seat']: r for r in reviews}
+    if len(expected) < 2:
+        return 'unavailable'
+    if len(expected) >= 2 and all(by_head.get(h, {}).get('approve') is True
+           and by_head[h].get('accept_answer') is True and not by_head[h].get('error')
+           for h in expected):
+        return 'consensus'
+    if any(h not in by_head or by_head[h].get('error') or type(by_head[h].get('accept_answer')) is not bool for h in expected):
+        return 'unavailable'
+    return 'next_round' if round_ - round_start + 1 < MAX_ROUNDS else 'budget_exhausted'
 
 
 def build_head_prompt(seat: str, persona: str, decision: dict, since_id: int,

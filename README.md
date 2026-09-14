@@ -111,7 +111,11 @@ them see the journal and the **memory graph**) and vote in parallel:
   **Continue with context** for another round or **Close with my ruling** to
   close it with your decision. Type the context or ruling and press send.
 
-Questions that all three heads classify as `info` receive a second contrast+round before closing. A first unanimous `info` is an initial framing, not a+useful synthesis; the council closes it only after that contrast round or+leaves it for arbitration when the perspectives still do not converge.
+Unanimous `info` votes receive a contrast round, then the heads evaluate one
+shared answer. Editorial fidelity and acceptance of its content are separate.
+Substantive objections feed another debate round, up to three rounds per human
+continuation. At the limit, or if a reviewer fails, the answer is explicitly
+provisional; matching `INFO` votes alone never establish content consensus.
 
 If you selected an open or STALEMATE decision, your message goes **to it**:
 context while it's deliberating; on a STALEMATE you explicitly choose to

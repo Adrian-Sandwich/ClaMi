@@ -266,6 +266,16 @@ function renderSummary(d) {
       progress.textContent = `${synthesis.current_head || "El consejo"}: ${synthesis.phase === "drafting" ? "corrigiendo el borrador" : "revisando la respuesta"}. Hasta 120 segundos por intervención.`;
       content.append(progress);
     }
+    if (synthesis.content_state) {
+      const note = document.createElement("p");
+      const labels = {consensus:"Las cabezas aceptaron esta respuesta común; eso no demuestra que sea una verdad universal.",
+        next_round:"Todavía hay objeciones al contenido. El consejo continuará con una ronda de corrección.",
+        budget_exhausted:"Respuesta provisional: se agotaron las rondas sin acuerdo sobre el contenido.",
+        unavailable:"Respuesta provisional: faltó una revisión válida del contenido."};
+      note.textContent = labels[synthesis.content_state] || "";
+      content.prepend(note);
+      if (!synthesis.content_consensus) title.textContent += " · Sin consenso de contenido";
+    }
     for (const [key, label] of [["agreements", "Puntos compartidos"], ["differences", "Diferencias"], ["open_questions", "Qué falta resolver"]]) {
       if (!(synthesis[key] || []).length) continue;
       const section = document.createElement("section");
