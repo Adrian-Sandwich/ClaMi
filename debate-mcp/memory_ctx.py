@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+import semantic_memory
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,7 +55,7 @@ def _excerpt(text, limit=450):
 def retrieve(query, artifact=None, thread=None):
     """Return relevant nodes, ordered by thread, project, topic and source date.
 
-    No unconditional recent-decisions fallback. Search is lexical at this stage;
+    No unconditional recent-decisions fallback. Lexical and semantic evidence combine;
     a bounded one-hop traversal adds related files, docs and code, not hub nodes.
     """
     if not DB_PATH.exists():
@@ -64,6 +65,7 @@ def retrieve(query, artifact=None, thread=None):
     try:
         with closing(sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
             conn.row_factory = sqlite3.Row
+            semantic = semantic_memory.scores(conn, query)
             def candidates():
                 for row in conn.execute('SELECT id,label,domain,props,updated_at FROM nodes'):
                     p = _props(row['props'])
@@ -80,14 +82,17 @@ def retrieve(query, artifact=None, thread=None):
                         if item.get('active'):
                             content.update(_terminos(item.get('text', ''), None))
                     matches = len(terms & title) * 4 + len(terms & content)
-                    score = 100 * same_thread + 20 * same_repo + matches
+                    similarity, fingerprint = semantic.get(row['id'], (0, None))
+                    if similarity and fingerprint != semantic_memory.digest(semantic_memory.documents(row['label'], p)):
+                        similarity = 0  # Changed content must be reindexed first.
+                    score = 100 * same_thread + 20 * same_repo + matches + similarity * 8
                     if not score:
                         continue
                     # last_at is event time; updated_at can be only ingestion time.
                     date = p.get('last_at') or p.get('first_at') or row['updated_at']
                     yield {'id': row['id'], 'label': row['label'], 'domain': row['domain'],
                            'props': p, 'score': score, 'date': date,
-                           'reason': 'same thread' if same_thread else 'same repository' if same_repo else 'topic match'}
+                           'reason': 'same thread' if same_thread else 'same repository' if same_repo else 'semantic + topic match' if similarity and matches else 'semantic match' if similarity else 'topic match'}
             hits = heapq.nlargest(MAX_HITS, candidates(), key=lambda h: (h['score'], h['date'], h['id']))
             seen = {h['id'] for h in hits}
             for seed in hits[:3]:
@@ -99,6 +104,10 @@ def retrieve(query, artifact=None, thread=None):
                       AND n.domain IN ('file','code','doc')
                     ORDER BY n.id LIMIT 2''', (seed['id'], seed['id'], seed['id']))
                 for row in neighbors:
+                    neighbor_props = _props(row['props'])
+                    neighbor_repo = _path(neighbor_props.get('artifact'))
+                    if repo and neighbor_repo and neighbor_repo != repo:
+                        continue
                     if row['id'] not in seen:
                         seen.add(row['id'])
                         hits.append({'id': row['id'], 'label': row['label'], 'domain': row['domain'],

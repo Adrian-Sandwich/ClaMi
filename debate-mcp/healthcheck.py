@@ -132,6 +132,8 @@ def check_graph() -> tuple[str, str]:
         if sync.get('status') == 'error':
             return WARN, f"sincronización de conversaciones fallando ({sync.get('error', 'error')}); se reintentará"
         last_success = sync.get('last_success')
+        if sync.get('semantic_status') not in (None, 'ok'):
+            return WARN, f"conversaciones sincronizadas; índice semántico pendiente ({sync['semantic_status']})"
         if last_success and _age_secs(last_success) < 180:
             return OK, f"conversaciones sincronizadas hace {_human(_age_secs(last_success))}; otras fuentes dependen de refresh.sh"
         return WARN, 'sincronización de conversaciones pendiente o atrasada'

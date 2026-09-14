@@ -1,0 +1,2 @@
+# Optional local multilingual retrieval. Download the model explicitly once.
+fastembed==0.8.0

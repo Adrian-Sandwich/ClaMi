@@ -43,6 +43,16 @@ class MemorySync:
             with self._lock:
                 self._state.update(status='ok', last_success=time.time(), failures=0)
                 self._state.pop('error', None)
+            try:
+                subprocess.run([sys.executable, str(Path(__file__).with_name('semantic_memory.py'))], env=env,
+                               check=True, timeout=TIMEOUT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.SubprocessError) as exc:
+                with self._lock:
+                    self._state['semantic_status'] = type(exc).__name__
+            else:
+                with self._lock:
+                    self._state['semantic_status'] = 'ok'
 
     def _run(self):
         while not self._stop.is_set():

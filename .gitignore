@@ -17,3 +17,4 @@ experiments/
 
 # log del refresh agendado del grafo de memoria
 memory-graph/*.log
+memory-graph/models/

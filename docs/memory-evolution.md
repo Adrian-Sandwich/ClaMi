@@ -46,12 +46,55 @@ también desactiva un elemento. Se ignoran declaraciones de modelos, citas y blo
 de código. El texto libre se conserva como contexto con su fuente, pero no se
 convierte automáticamente en preferencias o restricciones permanentes.
 
-## Paso 3: recuperación semántica
+## Paso 3: recuperación semántica (implementado, evaluación inicial)
 
-Combinar búsqueda textual indexada con similitud semántica y relaciones del grafo.
-La implementación actual recorre nodos y compara términos: no comprende sinónimos
-y su costo crece con el grafo. Comparar contra casos de recuperación anotados antes
-de sustituirla; exigir fuentes relevantes y aislamiento por proyecto.
+La búsqueda combina coincidencias de palabras con embeddings multilingües locales
+de `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, mediante
+FastEmbed 0.8.0. Consulta los mismos nodos y conserva las prioridades de conversación
+y repositorio, las referencias a fuentes y el recorrido acotado del grafo.
+La similitud se aplica a decisiones, conversaciones y documentos. Los archivos y
+símbolos de código se recuperan por palabras o relaciones; sus rutas solas producen
+demasiadas asociaciones semánticas débiles. No envía textos a un servicio de
+embeddings. La similitud no mide veracidad.
+
+Instalación en Windows (desde la raíz):
+
+```powershell
+.\debate-mcp\.venv\Scripts\python.exe -m pip install -r debate-mcp/requirements-semantic.txt
+.\debate-mcp\.venv\Scripts\python.exe debate-mcp/semantic_memory.py --download
+```
+
+El modelo se descarga explícitamente una vez a `memory-graph/models/` (ignorado por
+Git). La consulta sólo usa archivos locales. Si falta el modelo, la dependencia
+o el índice, sigue disponible la recuperación por palabras. `MEMORY_SEMANTIC=0`
+desactiva la similitud en consultas.
+
+El relay actualiza el índice después de sincronizar conversaciones. Los vectores
+se guardan en SQLite por modelo y contenido; las filas obsoletas no participan
+hasta reindexarse. Los lotes confirmados sobreviven a un reinicio. El estado
+`semantic_status` aparece en el heartbeat y los fallos en `healthcheck.py`.
+
+Evaluación reproducible con el modelo instalado:
+
+```powershell
+$env:CLAMI_SEMANTIC_EVAL = '1'
+.\debate-mcp\.venv\Scripts\python.exe -m pytest tests/test_semantic_memory.py -s
+```
+
+En seis reformulaciones de desarrollo, la búsqueda por palabras obtuvo 0/6
+primeros resultados correctos y la híbrida 5/6 con umbral de coseno 0.45. Una
+consulta ajena (receta de pastel) no recuperó resultados. El umbral se ajustó con
+esos mismos ejemplos: no son una evaluación independiente ni una garantía general.
+El caso de autenticación sigue fallando. Ampliar el conjunto con casos reales,
+negaciones, sinónimos y consultas sin respuesta antes de ajustar más el ranking.
+
+La comparación sigue siendo exhaustiva y crece con el número de vectores. Quedan
+pendientes un índice textual FTS y búsqueda vectorial aproximada para grandes
+historiales. Los pasajes se limitan a 24 por nodo; los documentos largos pueden
+perder cobertura. Las fuentes sin repositorio declarado no pueden aislarse por
+proyecto con la misma garantía que las decisiones que sí lo especifican.
+
+Referencia del proveedor: https://qdrant.github.io/fastembed/examples/Supported_Models/
 
 ## Paso 4: síntesis conjunta
 

@@ -68,6 +68,8 @@ def _no_accidental_agent_spawn(monkeypatch):
         raise AssertionError(f"un test intentó lanzar un proceso: {a[:1]}")
 
     monkeypatch.setattr(subprocess, "Popen", _boom, raising=True)
+    if os.environ.get('CLAMI_SEMANTIC_EVAL') != '1':
+        monkeypatch.setenv('MEMORY_SEMANTIC', '0')
     os.environ.setdefault("DEBATE_CONNINFO", "dbname=debate user=adrianmedina host=localhost")
 
 
