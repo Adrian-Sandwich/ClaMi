@@ -76,6 +76,9 @@ def retrieve(query, artifact=None, thread=None):
                     content = set(_terminos(p.get('objective', ''), None))
                     for item in p.get('evidence') or []:
                         content.update(_terminos(item.get('body', ''), None))
+                    for item in p.get('explicit_memory', {}).get('current', []):
+                        if item.get('active'):
+                            content.update(_terminos(item.get('text', ''), None))
                     matches = len(terms & title) * 4 + len(terms & content)
                     score = 100 * same_thread + 20 * same_repo + matches
                     if not score:
@@ -123,15 +126,29 @@ def memoria_para(titulo, artifact=None, thread=None):
             lines.append(f"Repositorio: {_excerpt(p['artifact'], 200)}")
         if p.get('objective'):
             lines.append(f"Objetivo declarado: {_excerpt(p['objective'])}")
+        for item in p.get('explicit_memory', {}).get('current', []):
+            state = 'vigente' if item.get('active') else 'cancelado/resuelto'
+            lines.append(f"[message:{item['message_id']}; v{item['version']}; {state}] "
+                         f"{item['kind']} [{item['key']}]: {_excerpt(item['text'])}")
         for item in p.get('evidence') or []:
             lines.append(f"[message:{item.get('id')}; {item.get('author')}; {item.get('kind')}] {_excerpt(item.get('body'))}")
         if p.get('pending'):
             lines.append('Pendiente: ' + _excerpt(p['pending']))
         for condition in p.get('approved_conditions') or []:
             lines.append('Condición registrada: ' + _excerpt(condition, 220))
-        block = '\n'.join(lines)
-        if used + len(block) + 2 > MAX_CHARS:
-            break
+        # Keep the source heading and as many complete lines as fit, rather
+        # than dropping an oversized first result and returning only a header.
+        remaining = MAX_CHARS - used - 2
+        fitted = []
+        for line in lines:
+            cost = len(line) + (1 if fitted else 0)
+            if cost > remaining:
+                break
+            fitted.append(line)
+            remaining -= cost
+        if not fitted:
+            continue
+        block = '\n'.join(fitted)
         blocks.append(block)
         used += len(block) + 2
     return '\n\n'.join(blocks)

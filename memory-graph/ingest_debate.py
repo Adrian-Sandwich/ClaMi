@@ -12,12 +12,15 @@
 """
 
 from datetime import datetime, timezone
+import hashlib
+import json
 
 import psycopg
 from psycopg.rows import dict_row
 
 import db
 import settings
+from explicit_memory import extract
 
 CONNINFO = settings.CONNINFO
 SOURCE = "ingest_debate"
@@ -35,6 +38,17 @@ def _iso(ts) -> str | None:
     return ts.isoformat() if ts else None
 
 
+def changed(conn, identifier, row):
+    """Checkpoint and node writes commit together; failed runs remain retryable."""
+    digest = hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()
+    previous = conn.execute('SELECT digest FROM debate_checkpoints WHERE id=?', (identifier,)).fetchone()
+    exists = conn.execute('SELECT 1 FROM nodes WHERE id=?', (identifier,)).fetchone()
+    if exists and previous == (digest,):
+        return False
+    conn.execute('INSERT OR REPLACE INTO debate_checkpoints VALUES (?,?)', (identifier, digest))
+    return True
+
+
 def write_decision(conn, r: dict, now: str) -> None:
     """Una decisión como nodo del grafo + edge journal_of desde su thread.
 
@@ -47,6 +61,7 @@ def write_decision(conn, r: dict, now: str) -> None:
         "objective": r["title"],
         "artifact": r.get("artifact"),
         "evidence": r.get("evidence") or [],
+        "explicit_memory": extract(r.get("human_messages") or []),
         "approved_conditions": minority.get("approved_conditions") or [],
         "pending": "Awaiting human input" if r["status"] == "split" else
                    "Implementation in progress" if r["status"] == "executing" else
@@ -100,10 +115,14 @@ def main() -> None:
                 FROM messages GROUP BY thread, kind
             )
             SELECT m.thread,
+                   (SELECT artifact FROM decisions WHERE thread=m.thread ORDER BY id DESC LIMIT 1) AS artifact,
                    count(*) AS n_messages,
                    min(m.created_at) AS first_at,
                    max(m.created_at) AS last_at,
                    array_agg(DISTINCT m.author) AS authors,
+                   COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                       'id',h.id,'author',h.author,'body',h.body,'created_at',h.created_at) ORDER BY h.id)
+                       FROM messages h WHERE h.thread=m.thread AND h.author='adrian'), '[]'::jsonb) AS human_messages,
                    (SELECT json_object_agg(kind, kind_count) FROM kc WHERE kc.thread = m.thread) AS kind_counts
             FROM messages m
             GROUP BY m.thread
@@ -112,6 +131,9 @@ def main() -> None:
         decisions = pg.execute(
             """
             SELECT d.*,
+                   COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                       'id',id,'author',author,'body',body,'created_at',created_at) ORDER BY id)
+                       FROM messages WHERE thread=d.thread AND author='adrian'), '[]'::jsonb) AS human_messages,
                    (SELECT max(created_at) FROM messages WHERE thread=d.thread) AS last_message_at,
                    COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM (
                        SELECT DISTINCT ON (author) id,author,kind,left(body,1800) AS body,created_at
@@ -125,9 +147,13 @@ def main() -> None:
         ).fetchall()
 
     seen: set[str] = set()
+    conn.execute('CREATE TABLE IF NOT EXISTS debate_checkpoints (id TEXT PRIMARY KEY, digest TEXT NOT NULL)')
     n = 0
     for r in rows:
         seen.add(node_id(r["thread"]))
+        n += 1
+        if not changed(conn, node_id(r['thread']), r):
+            continue
         db.upsert_node(
             conn,
             id=node_id(r["thread"]),
@@ -139,6 +165,10 @@ def main() -> None:
             size=min(30, max(8, 6 + r["n_messages"])),
             tooltip=f"{r['n_messages']} mensajes, {r['first_at'].isoformat()} - {r['last_at'].isoformat()}",
             props={
+                "thread": r['thread'],
+                "artifact": r['artifact'],
+                "explicit_memory": extract(r['human_messages']),
+                "evidence": [dict(m, kind='human_context', body=m['body'][:1800]) for m in r['human_messages'][-3:]],
                 "n_messages": r["n_messages"],
                 "authors": r["authors"],
                 "kind_counts": r["kind_counts"],
@@ -146,15 +176,17 @@ def main() -> None:
                 "last_at": r["last_at"].isoformat(),
             },
         )
-        n += 1
 
     seen_decisions: set[str] = set()
     for r in decisions:
         seen_decisions.add(decision_node_id(r["id"]))
-        write_decision(conn, r, now)
+        identifier = decision_node_id(r['id'])
+        if changed(conn, identifier, r):
+            write_decision(conn, r, now)
 
     n_swept = db.sweep_domain(conn, "debate_thread", seen)
     n_swept_decisions = db.sweep_domain(conn, "decision", seen_decisions)
+    conn.execute('DELETE FROM debate_checkpoints WHERE id NOT IN (SELECT id FROM nodes)')
     conn.commit()
     conn.close()
     print(

@@ -72,6 +72,7 @@ import psycopg  # noqa: E402
 import apihead  # noqa: E402
 import board  # noqa: E402
 import memory_ctx  # noqa: E402
+import memory_sync  # noqa: E402
 import decision  # noqa: E402
 import heads  # noqa: E402
 import personas  # noqa: E402
@@ -229,6 +230,7 @@ def write_heartbeat(state: dict, pg_ok: bool) -> None:
         "ts": now_iso(),
         "pid": os.getpid(),
         "pg_ok": pg_ok,
+        "memory_sync": memory_sync.sync.snapshot(),
         "last_id": state["last_id"],
         "inflight": inflight,
         "pending": len(state["pending"]),
@@ -1040,6 +1042,7 @@ def process_cycle(conn, state: dict) -> None:
 
 def main() -> None:
     state = load_state()
+    memory_sync.sync.start()
     log.info("relay arrancando, last_id=%s", state["last_id"])
     backoff = 1
 
@@ -1062,7 +1065,7 @@ def main() -> None:
                     # queda en pending y sin esto el debate se congelaba
                     # hasta el wake ocioso). Ocioso de verdad = wake largo.
                     idle = not state["pending"] and not _inflight
-                    wake = 2 if not idle else IDLE_WAKE_SECS
+                    wake = 2 if not idle else min(IDLE_WAKE_SECS, memory_sync.INTERVAL)
                     for _notify in conn.notifies(timeout=wake, stop_after=1):
                         break
         except Exception:

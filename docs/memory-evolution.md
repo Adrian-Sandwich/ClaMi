@@ -16,13 +16,35 @@ repositorio o thread al recuperador.
 Validación: pruebas de relevancia, identidad de repositorios, continuidad,
 referencias a mensajes, recorrido de relaciones y presupuesto de contexto.
 
-## Paso 2: actualización continua y memoria estructurada
+## Paso 2: actualización continua y memoria estructurada (implementado)
 
-La ingesta sigue dependiendo de ejecutar `memory-graph/ingest_debate.py` o del
-refresh existente. Implementar sincronización incremental después de cambios del
-journal, con reintentos, estado visible y recuperación tras reinicios. Conservar
-objetivos, restricciones y pendientes explícitos con fuentes, versiones y
-correcciones del usuario. No inferir preferencias permanentes de una sola frase.
+El relay ejecuta la ingesta de conversaciones en segundo plano al arrancar y cada
+30 segundos después de terminar la anterior. Un fallo se reintenta con espera
+creciente (hasta 240 segundos); cada proceso tiene un timeout de 60 segundos.
+El heartbeat y `healthcheck.py` muestran el estado y la última sincronización
+exitosa. Esto actualiza conversaciones y decisiones; las sesiones externas,
+documentación, código y exportación 3D siguen dependiendo del refresh existente.
+
+Se consulta el historial completo de Postgres, pero sólo se reescriben nodos cuyo
+contenido cambió. Los checkpoints se confirman junto con los nodos en SQLite.
+Un reinicio o fallo no pierde cambios pendientes. No es aún una consulta incremental
+por eventos: reducir el volumen leído queda pendiente para historiales grandes.
+
+Las declaraciones humanas explícitas se guardan por conversación con fuente y
+versiones. Por ejemplo:
+
+```text
+Objetivo: Publicar una versión estable
+Restricción [datos]: Conservar los datos existentes
+Pendiente [pruebas]: Validar la migración
+```
+
+Otra declaración del mismo tipo y clave sustituye la versión vigente, preservando
+el historial. Sin clave se usa `general`; claves distintas conservan elementos
+independientes. `Pendiente [pruebas]: resuelto` cierra ese pendiente; `cancelado`
+también desactiva un elemento. Se ignoran declaraciones de modelos, citas y bloques
+de código. El texto libre se conserva como contexto con su fuente, pero no se
+convierte automáticamente en preferencias o restricciones permanentes.
 
 ## Paso 3: recuperación semántica
 

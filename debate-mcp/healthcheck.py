@@ -123,6 +123,18 @@ def check_relay() -> tuple[str, str]:
 def check_graph() -> tuple[str, str]:
     if not MEMORY_DB.exists():
         return WARN, f"{MEMORY_DB} no existe: nunca se corrió memory-graph/refresh.sh"
+    try:
+        heartbeat = json.loads(HEARTBEAT_PATH.read_text())
+        sync = heartbeat.get('memory_sync', {})
+    except (OSError, ValueError):
+        sync = {}
+    if sync:
+        if sync.get('status') == 'error':
+            return WARN, f"sincronización de conversaciones fallando ({sync.get('error', 'error')}); se reintentará"
+        last_success = sync.get('last_success')
+        if last_success and _age_secs(last_success) < 180:
+            return OK, f"conversaciones sincronizadas hace {_human(_age_secs(last_success))}; otras fuentes dependen de refresh.sh"
+        return WARN, 'sincronización de conversaciones pendiente o atrasada'
     age = _age_secs(MEMORY_DB.stat().st_mtime)
     size_mb = MEMORY_DB.stat().st_size / 1e6
     detail = f"actualizado hace {_human(age)} ({size_mb:.0f} MB)"
