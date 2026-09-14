@@ -63,6 +63,26 @@ def test_joint_answer_replaces_transcript_and_marks_partial_review(page):
     assert page.locator('#detail-panel').get_attribute('open') is None
 
 
+def test_outcome_retry_preserves_report_and_request_identity(page):
+    feed(page,snapshot('closed'))
+    page.locator('#outcome-panel summary').click()
+    page.locator('#outcome-status').select_option('failed')
+    page.locator('#outcome-observation').fill('Sigue fallando al reiniciar')
+    page.locator('#outcome-evidence').fill('Prueba en mi equipo')
+    sent = []
+    def fail(route):
+        sent.append(route.request.post_data_json)
+        route.fulfill(status=503,content_type='application/json',body='{"error":"Temporal"}')
+    page.route('**/outcome',fail)
+    page.locator('#outcome-save').click()
+    page.wait_for_function("document.getElementById('outcome-notice').textContent === 'Temporal'")
+    assert page.locator('#outcome-observation').input_value() == 'Sigue fallando al reiniciar'
+    page.locator('#outcome-save').click()
+    page.wait_for_function("!document.getElementById('outcome-save').disabled")
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert sent[0]['decision_id'] == 4
+
+
 def test_composer_targets_actions_and_preserves_failed_drafts(page):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))

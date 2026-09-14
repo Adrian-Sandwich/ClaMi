@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import board  # noqa: E402
+import outcomes  # noqa: E402
 
 from config import connect  # noqa: E402
 
@@ -138,14 +139,16 @@ def build_state(conn) -> dict:
     open_rows = conn.execute(
         """
         SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report,
-               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version
+               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version,
+               (SELECT to_jsonb(o) FROM decision_outcomes o WHERE decision_id=decisions.id ORDER BY o.id DESC LIMIT 1) AS outcome
         FROM decisions WHERE status IN ('open', 'split', 'executing') ORDER BY id
         """
     ).fetchall()
     closed_rows = conn.execute(
         """
         SELECT id, title, artifact, protocol, status, ruling, confidence, round, thread, heads, minority_report,
-               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version
+               (SELECT COALESCE(max(id),0) FROM messages WHERE thread=decisions.thread) AS journal_version,
+               (SELECT to_jsonb(o) FROM decision_outcomes o WHERE decision_id=decisions.id ORDER BY o.id DESC LIMIT 1) AS outcome
         FROM decisions WHERE status = 'closed' ORDER BY id DESC LIMIT %s
         """,
         (CLOSED_DECISIONS,),
@@ -222,6 +225,7 @@ def build_state(conn) -> dict:
             "aborted": bool(mr.get("aborted")),
             "execution_state": mr.get("execution_state"),
             "synthesis": synthesis,
+            "outcome": r.get('outcome'),
             "seats": seats, "journal": journal,
         })
 
@@ -469,7 +473,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- POST
 
     def do_POST(self) -> None:
-        if self.path not in ("/start", "/message", "/abort"):
+        if self.path not in ("/start", "/message", "/abort", "/outcome"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -510,8 +514,19 @@ class Handler(BaseHTTPRequestHandler):
             self._start(payload)
         elif self.path == "/abort":
             self._abort(payload)
+        elif self.path == "/outcome":
+            self._outcome(payload)
         else:
             self._message(payload)
+
+    def _outcome(self, payload):
+        try:
+            with connect() as conn:
+                with conn.transaction():
+                    result = outcomes.record(conn, payload)
+            self._send_json(result, 201)
+        except ValueError as exc:
+            self._send_json({'error': str(exc)}, 400)
 
     def _start(self, payload: dict) -> None:
         try:

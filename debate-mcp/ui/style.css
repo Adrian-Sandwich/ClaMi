@@ -557,6 +557,9 @@ body {
 #summary-content { color: #e6d3b7; line-height: 1.55; max-width: 78ch; }
 #summary-content section { margin-top: 12px; }
 #summary-content ul { padding-left: 22px; margin: 5px 0; }
+#outcome-form { padding: 12px; color: #e6d3b7; }
+#outcome-form label { display: block; margin: 10px 0; }
+#outcome-form textarea { display: block; box-sizing: border-box; width: 100%; margin-top: 5px; }
 .summary-meta { color: #ffb454; font-size: 12px; letter-spacing: .04em; }
 .summary-conditions { border-left: 3px solid #52e691; color: #bfe9ca; line-height: 1.5; margin-top: 12px; padding: 7px 10px; }
 .summary-seats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }

@@ -81,6 +81,9 @@ def retrieve(query, artifact=None, thread=None):
                     for item in p.get('explicit_memory', {}).get('current', []):
                         if item.get('active'):
                             content.update(_terminos(item.get('text', ''), None))
+                    experience = p.get('experience') or {}
+                    report = experience.get('latest_report') or {}
+                    content.update(_terminos(' '.join(report.get(k, '') for k in ('observation','evidence','lesson')), None))
                     matches = len(terms & title) * 4 + len(terms & content)
                     similarity, fingerprint = semantic.get(row['id'], (0, None))
                     if similarity and fingerprint != semantic_memory.digest(semantic_memory.documents(row['label'], p)):
@@ -135,6 +138,20 @@ def memoria_para(titulo, artifact=None, thread=None):
             lines.append(f"Repositorio: {_excerpt(p['artifact'], 200)}")
         if p.get('objective'):
             lines.append(f"Objetivo declarado: {_excerpt(p['objective'])}")
+        experience = p.get('experience') or {}
+        report = experience.get('latest_report')
+        if report:
+            lines.append(f"[outcome:{report['id']}; message:{report['message_id']}] Último resultado reportado por el usuario: {report['status']}. No verificado independientemente.")
+            lines.append('Observación: ' + _excerpt(report['observation']))
+            lines.append('Evidencia indicada: ' + _excerpt(report['evidence']))
+            if report.get('lesson'):
+                lines.append('Aprendizaje propuesto para este caso, no regla universal: ' + _excerpt(report['lesson']))
+            if experience.get('revised'):
+                lines.append('Este reporte corrige resultados anteriores diferentes; no reutilices sus conclusiones como vigentes.')
+        for event in experience.get('events', [])[-3:]:
+            lines.append(f"[message:{event['message_id']}; evento del sistema] {_excerpt(event['detail'])}")
+        if any(e['kind'] == 'merged' for e in experience.get('events', [])):
+            lines.append('Un merge confirma integración de código; no demuestra utilidad ni pruebas exitosas.')
         for item in p.get('explicit_memory', {}).get('current', []):
             state = 'vigente' if item.get('active') else 'cancelado/resuelto'
             lines.append(f"[message:{item['message_id']}; v{item['version']}; {state}] "

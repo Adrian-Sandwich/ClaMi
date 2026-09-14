@@ -35,6 +35,8 @@ def documents(label, props):
     texts = [str(label)]
     if props.get('objective'):
         texts.append(str(props['objective']))
+    report = (props.get('experience') or {}).get('latest_report') or {}
+    texts.extend(report.get(k, '') for k in ('observation','evidence','lesson'))
     texts.extend(item['text'] for item in props.get('explicit_memory', {}).get('current', []) if item.get('active'))
     texts.extend(item.get('body', '') for item in props.get('evidence', []))
     # Short passages prevent the model's token limit from hiding later evidence.

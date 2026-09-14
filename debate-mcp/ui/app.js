@@ -172,6 +172,64 @@ function shortReason(body) {
   return sentence.length < clean.length ? `${sentence}…` : sentence;
 }
 
+const outcomeDrafts = new Map();
+let outcomeTarget = null;
+let outcomeSending = false;
+const outcomeKeys = ["status", "observation", "evidence", "lesson"];
+function outcomeRequestId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+function outcomeDraft() {
+  return Object.fromEntries(outcomeKeys.map(k => [k, document.getElementById(`outcome-${k}`).value]));
+}
+function renderOutcome(d) {
+  const target = d?.id ?? null;
+  if (outcomeTarget !== target) {
+    if (outcomeTarget !== null) {
+      const old = outcomeDrafts.get(outcomeTarget) || {};
+      outcomeDrafts.set(outcomeTarget, {...old, ...outcomeDraft()});
+    }
+    outcomeTarget = target;
+    const draft = outcomeDrafts.get(target) || {};
+    for (const k of outcomeKeys) document.getElementById(`outcome-${k}`).value = draft[k] || (k === "status" ? "unknown" : "");
+    document.getElementById("outcome-notice").textContent = "";
+  }
+  document.getElementById("outcome-panel").hidden = !d || d.status === "open" || uiMode !== "council";
+  document.getElementById("outcome-save").disabled = outcomeSending || !connected;
+  const labels = {worked:"Funcionó", failed:"No funcionó", partial:"Parcial", unknown:"Sin confirmar"};
+  document.getElementById("outcome-last").textContent = d?.outcome
+    ? `Último reporte tuyo: ${labels[d.outcome.status]}. ${d.outcome.observation}`
+    : "Este reporte conserva lo observado en la misma decisión. No abre otra deliberación.";
+}
+document.getElementById("outcome-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!outcomeTarget || outcomeSending || !connected) return;
+  const target = outcomeTarget;
+  const values = outcomeDraft();
+  const signature = JSON.stringify(values);
+  const prior = outcomeDrafts.get(target) || {};
+  const request_id = prior.signature === signature ? prior.request_id : outcomeRequestId();
+  outcomeDrafts.set(target, {...values, signature, request_id});
+  outcomeSending = true; renderOutcome(focused());
+  try {
+    const response = await postJSON("/outcome", {decision_id:target, ...values, request_id});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "No se pudo guardar");
+    const unchanged = outcomeTarget === target && JSON.stringify(outcomeDraft()) === signature;
+    if (unchanged) outcomeDrafts.delete(target);
+    if (outcomeTarget === target) {
+      if (unchanged) for (const key of outcomeKeys.filter(k => k !== "status")) document.getElementById(`outcome-${key}`).value = "";
+      document.getElementById("outcome-notice").textContent = "Resultado guardado. El grafo lo incorporará en la próxima sincronización.";
+    }
+  } catch (err) {
+    if (outcomeTarget === target) document.getElementById("outcome-notice").textContent = err.message;
+  } finally { outcomeSending = false; renderOutcome(focused()); }
+});
+
 function renderSummary(d) {
   const card = document.getElementById("summary-card");
   const title = document.getElementById("summary-title");
@@ -375,6 +433,7 @@ function render() {
   renderMagi(d);
   renderStatusBar(d);
   renderSummary(d);
+  renderOutcome(d);
   renderConversation(d);
   renderHistory();
   renderIntent(d);

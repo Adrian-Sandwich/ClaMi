@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 import db
 import settings
 from explicit_memory import extract
+from experience import build as experience_for
 
 CONNINFO = settings.CONNINFO
 SOURCE = "ingest_debate"
@@ -40,7 +41,7 @@ def _iso(ts) -> str | None:
 
 def changed(conn, identifier, row):
     """Checkpoint and node writes commit together; failed runs remain retryable."""
-    digest = hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()
+    digest = hashlib.sha256(('experience-v1:' + json.dumps(row, sort_keys=True, default=str)).encode()).hexdigest()
     previous = conn.execute('SELECT digest FROM debate_checkpoints WHERE id=?', (identifier,)).fetchone()
     exists = conn.execute('SELECT 1 FROM nodes WHERE id=?', (identifier,)).fetchone()
     if exists and previous == (digest,):
@@ -62,6 +63,7 @@ def write_decision(conn, r: dict, now: str) -> None:
         "artifact": r.get("artifact"),
         "evidence": r.get("evidence") or [],
         "explicit_memory": extract(r.get("human_messages") or []),
+        "experience": experience_for(r),
         "approved_conditions": minority.get("approved_conditions") or [],
         "pending": "Awaiting human input" if r["status"] == "split" else
                    "Implementation in progress" if r["status"] == "executing" else
@@ -115,6 +117,7 @@ def main() -> None:
                 FROM messages GROUP BY thread, kind
             )
             SELECT m.thread,
+                   COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM decision_outcomes o JOIN decisions d ON d.id=o.decision_id WHERE d.thread=m.thread), '[]'::jsonb) AS outcome_reports,
                    (SELECT artifact FROM decisions WHERE thread=m.thread ORDER BY id DESC LIMIT 1) AS artifact,
                    count(*) AS n_messages,
                    min(m.created_at) AS first_at,
@@ -131,6 +134,9 @@ def main() -> None:
         decisions = pg.execute(
             """
             SELECT d.*,
+                   COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM decision_outcomes o WHERE o.decision_id=d.id), '[]'::jsonb) AS outcome_reports,
+                   COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'author',author,'body',left(body,2000),'created_at',created_at) ORDER BY id)
+                       FROM messages WHERE thread=d.thread AND author='magi' AND kind IN ('resultado','consulta')), '[]'::jsonb) AS system_messages,
                    COALESCE((SELECT jsonb_agg(jsonb_build_object(
                        'id',id,'author',author,'body',body,'created_at',created_at) ORDER BY id)
                        FROM messages WHERE thread=d.thread AND author='adrian'), '[]'::jsonb) AS human_messages,
@@ -166,6 +172,7 @@ def main() -> None:
             tooltip=f"{r['n_messages']} mensajes, {r['first_at'].isoformat()} - {r['last_at'].isoformat()}",
             props={
                 "thread": r['thread'],
+                "experience": experience_for(r),
                 "artifact": r['artifact'],
                 "explicit_memory": extract(r['human_messages']),
                 "evidence": [dict(m, kind='human_context', body=m['body'][:1800]) for m in r['human_messages'][-3:]],

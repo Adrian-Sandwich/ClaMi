@@ -123,12 +123,26 @@ por aporte) y tres intervenciones humanas recientes. La síntesis puede omitir
 matices fuera de ese contexto. La convergencia semántica del debate original sigue
 pendiente: este paso revisa la respuesta final, no sustituye el motor de rondas.
 
-## Paso 5: aprender de resultados
+## Paso 5: aprender de resultados (implementado)
 
-Relacionar decisiones con implementaciones, pruebas y correcciones posteriores.
-Registrar qué funcionó y bajo qué condiciones, incluyendo fallos y evidencia que
-contradiga una conclusión anterior. Reutilizar aprendizajes con alcance explícito.
-Esto mejora la memoria del sistema; no reentrena por sí mismo los modelos.
+La opción **¿Cómo salió?** permite registrar funcionó, falló, parcial o sin confirmar,
+con observación, evidencia indicada y un aprendizaje opcional. Se conserva en la
+misma decisión sin reabrirla ni autorizar ejecuciones. Un identificador por envío
+evita duplicados al reintentar un fallo de conexión. Las correcciones son nuevos
+reportes: el historial no se sobrescribe.
+
+La migración `005_outcomes.sql` guarda los reportes y su mensaje de origen en
+Postgres. La sincronización los lleva al grafo y la búsqueda textual/semántica
+puede recuperar observaciones y aprendizajes. El contexto identifica el último
+reporte, señala resultados anteriores diferentes y limita el aprendizaje al caso.
+Los reportes del usuario no se presentan como verificación independiente.
+
+También se conservan eventos del journal emitidos por MAGI: ejecución fallida,
+merge bloqueado o completado, con referencia al mensaje; los metadatos disponibles
+enlazan revisión y commits. Un merge no implica pruebas exitosas ni utilidad.
+No se deducen causas de fallos automáticamente: el detalle registrado y la evidencia
+siguen siendo necesarios. Esto mejora la memoria; no reentrena los modelos ni
+demuestra por sí solo una mejora global en la calidad de sus respuestas.
 
 ## Paso 6: medir la mejora
 
