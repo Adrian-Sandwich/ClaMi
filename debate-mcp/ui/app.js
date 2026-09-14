@@ -256,10 +256,16 @@ function renderSummary(d) {
     : d.status === "split" ? "The perspectives do not converge. Read the three reasons below, then choose how to continue."
     : "La respuesta conjunta todavía no está disponible para esta conversación. Los aportes completos están disponibles abajo.";
   const synthesis = d.synthesis;
-  if (synthesis && ["reviewed", "partial"].includes(synthesis.status)) {
+  if (synthesis?.answer && ["reviewed", "partial", "generating"].includes(synthesis.status)) {
     lead.textContent = synthesis.answer;
     const approved = (synthesis.reviews || []).filter(r => r.approve).length;
-    meta.textContent += ` · Revisión de fidelidad: ${approved}/${(synthesis.reviews || []).length} · ciclo ${synthesis.cycle}/2`;
+    meta.textContent += ` · Revisión de fidelidad: ${approved}/${(d.seats || []).length} · ciclo ${synthesis.cycle}/2`;
+    if (synthesis.status === "generating") {
+      title.textContent += " · Borrador en revisión";
+      const progress = document.createElement("p");
+      progress.textContent = `${synthesis.current_head || "El consejo"}: ${synthesis.phase === "drafting" ? "corrigiendo el borrador" : "revisando la respuesta"}. Hasta 120 segundos por intervención.`;
+      content.append(progress);
+    }
     for (const [key, label] of [["agreements", "Puntos compartidos"], ["differences", "Diferencias"], ["open_questions", "Qué falta resolver"]]) {
       if (!(synthesis[key] || []).length) continue;
       const section = document.createElement("section");
@@ -271,7 +277,7 @@ function renderSummary(d) {
     if (synthesis.status === "partial") {
       title.textContent += " · Borrador sin validación completa";
       const note = document.createElement("p");
-      note.textContent = "Borrador: no todas las cabezas validaron esta síntesis tras dos ciclos.";
+      note.textContent = `Borrador: no todas las cabezas validaron esta síntesis. Ciclos realizados: ${synthesis.cycle}.`;
       content.prepend(note);
       for (const review of (synthesis.reviews || []).filter(r => !r.approve)) {
         const item = document.createElement("p"); item.textContent = `${review.seat}: ${review.feedback}`; content.append(item);
@@ -280,7 +286,7 @@ function renderSummary(d) {
   } else if (synthesis?.status === "error") {
     lead.textContent = "No se pudo preparar la síntesis. Las aportaciones están conservadas; podés continuar esta conversación.";
   } else if (synthesis?.status === "generating") {
-    lead.textContent = "El consejo está redactando y revisando la respuesta conjunta…";
+    lead.textContent = `${synthesis.current_head || "El consejo"} está redactando la respuesta conjunta. Ciclo ${synthesis.cycle || 1}/2; hasta 120 segundos por intervención.`;
   }
   const allConditions = [...new Set((d.seats || []).flatMap(s => s.conditions || []))];
   conditions.hidden = !allConditions.length;

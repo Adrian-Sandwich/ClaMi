@@ -63,10 +63,34 @@ def test_stale_result_is_not_published():
 
 
 def test_broken_reviewer_output_is_not_approval():
+    calls = []
     def invoke(seat, prompt):
+        calls.append(prompt)
         if 'Redactá una respuesta' in prompt:
             return json.dumps(DRAFT)
         return 'Provider error: invalid model'
     result = synthesis.compose(BUNDLE, SEATS, invoke)
     assert result['status'] == 'partial'
     assert not any(review['approve'] for review in result['reviews'])
+    assert len(calls) == 4
+    assert result['cycle'] == 1
+    assert result['stop_reason'] == 'review_unavailable'
+
+
+def test_draft_is_published_before_slow_review_and_survives_failed_revision():
+    updates = []
+    drafts = 0
+    def invoke(seat,prompt):
+        nonlocal drafts
+        if 'Redactá una respuesta' in prompt:
+            drafts += 1
+            if drafts == 2:
+                raise TimeoutError()
+            return json.dumps(DRAFT)
+        assert updates[-1]['answer'] == DRAFT['answer']
+        assert updates[-1]['current_head'] == seat['seat']
+        return json.dumps({'approve':False,'feedback':'Aclarar el alcance'})
+    result = synthesis.compose(BUNDLE,SEATS,invoke,progress=updates.append)
+    assert result['answer'] == DRAFT['answer']
+    assert result['status'] == 'partial'
+    assert result['stop_reason'] == 'revision_failed'

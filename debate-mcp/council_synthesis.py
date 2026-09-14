@@ -38,7 +38,7 @@ def parse(text, review=False):
     return candidates[-1]
 
 
-def compose(bundle, seats, invoke):
+def compose(bundle, seats, invoke, progress=lambda result: None):
     available = {s['seat']: s for s in seats}
     expected = bundle['heads']
     active = [available[name] for name in expected if name in available]
@@ -53,17 +53,27 @@ def compose(bundle, seats, invoke):
             'No inventes hechos ni acuerdo; coincidencia de votos no demuestra verdad. '
             'Distingue lo que sostienen las fuentes de lo que no está demostrado.\nFUENTES:\n' + context)
     feedback = []
+    draft = None
     for cycle in range(1, MAX_CYCLES + 1):
         prompt = base + '\nRedactá una respuesta directa de hasta 180 palabras que integre las perspectivas. '
         prompt += 'Devolvé sólo JSON: {"answer":"...","agreements":[],"differences":[],"open_questions":[]}.'
         if feedback:
             prompt += '\nCorregí el borrador anterior según estas revisiones:\n' + json.dumps(feedback, ensure_ascii=False)
             prompt += '\nBORRADOR ANTERIOR:\n' + json.dumps(draft, ensure_ascii=False)
-        draft = parse(invoke(writer, prompt))
+        progress(dict(draft or {}, status='generating', phase='drafting', cycle=cycle, current_head=writer['seat']))
+        try:
+            draft = parse(invoke(writer, prompt))
+        except Exception:
+            if draft is not None:
+                return dict(draft, status='partial', cycle=cycle, reviews=feedback,
+                            stop_reason='revision_failed')
+            raise
         reviews = []
         for name in expected:
+            progress(dict(draft, status='generating', phase='reviewing', cycle=cycle,
+                          current_head=name, reviews=list(reviews)))
             if name not in available:
-                reviews.append({'seat': name, 'approve': False, 'feedback': 'Asiento no disponible para revisar.'})
+                reviews.append({'seat': name, 'approve': False, 'error': 'unavailable', 'feedback': 'Asiento no disponible para revisar.'})
                 continue
             prompt = base + '\nRevisá si este borrador representa fielmente TU aporte, conserva los desacuerdos '
             prompt += 'y evita afirmaciones no sustentadas. Aprobar fidelidad no significa adoptar las otras posturas. '
@@ -73,10 +83,15 @@ def compose(bundle, seats, invoke):
                 review = parse(invoke(available[name], prompt), review=True)
             except Exception as exc:
                 log.warning('Synthesis review %s failed (%s)', name, type(exc).__name__)
-                review = {'approve': False, 'feedback': 'No se pudo completar la revisión.'}
+                review = {'approve': False, 'error': type(exc).__name__, 'feedback': 'No se pudo completar la revisión.'}
             reviews.append(dict(review, seat=name))
         if all(r['approve'] for r in reviews):
             return dict(draft, status='reviewed', cycle=cycle, reviews=reviews)
+        # Infrastructure failure provides no editorial correction. Retrying it
+        # by rewriting a good draft only burns another full cycle.
+        if not any(not r['approve'] and not r.get('error') for r in reviews):
+            return dict(draft, status='partial', cycle=cycle, reviews=reviews,
+                        stop_reason='review_unavailable')
         feedback = reviews
     return dict(draft, status='partial', cycle=MAX_CYCLES, reviews=reviews)
 
@@ -127,7 +142,8 @@ def run_latest(invoke, retry=False):
                       'contributions': [dict(v, body=(v['body'] or '')[-3500:]) for v in votes]}
             save(conn,identifier,version,{'status':'generating'})
             try:
-                result = compose(bundle, heads.active_seats(), invoke)
+                result = compose(bundle, heads.active_seats(), invoke,
+                                 progress=lambda result: save(conn,identifier,version,result))
                 result['sources'] = [v['message_id'] for v in votes]
             except Exception as exc:
                 log.warning('Synthesis %s failed (%s)',identifier,type(exc).__name__)

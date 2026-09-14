@@ -63,6 +63,17 @@ def test_joint_answer_replaces_transcript_and_marks_partial_review(page):
     assert page.locator('#detail-panel').get_attribute('open') is None
 
 
+def test_draft_visible_while_head_review_is_pending(page):
+    data=snapshot('closed')
+    data['decisions'][0]['synthesis']={'status':'generating','answer':'Respuesta provisional útil',
+        'cycle':1,'phase':'reviewing','current_head':'melchior','reviews':[],
+        'agreements':[],'differences':[],'open_questions':[]}
+    feed(page,data)
+    assert page.locator('#summary-lead').inner_text() == 'Respuesta provisional útil'
+    assert 'Borrador en revisión' in page.locator('#summary-title').inner_text()
+    assert 'melchior' in page.locator('#summary-content').inner_text()
+
+
 def test_outcome_retry_preserves_report_and_request_identity(page):
     feed(page,snapshot('closed'))
     page.locator('#outcome-panel summary').click()

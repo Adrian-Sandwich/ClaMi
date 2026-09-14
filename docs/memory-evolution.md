@@ -103,6 +103,10 @@ ejecución que recibió actividad más recientemente. No procesa automáticament
 el historial. Un asiento redacta y cada asiento esperado revisa la fidelidad de
 la síntesis a las fuentes. Puede corregirse y revisarse una segunda vez: máximo
 dos ciclos, ocho invocaciones con tres asientos, 120 segundos por invocación.
+El borrador se publica antes de completar las revisiones, con la cabeza y fase
+activas. Un timeout o respuesta inválida no cuenta como objeción editorial y no
+provoca por sí solo otro ciclo. Si falla la corrección, se conserva el borrador
+anterior como parcial. El caso #26 motivó estas pruebas de progreso y recuperación.
 
 La interfaz presenta respuesta, puntos compartidos, diferencias y preguntas
 pendientes. Un borrador que no obtuvo todas las revisiones favorables se marca
