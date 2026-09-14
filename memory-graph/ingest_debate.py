@@ -44,6 +44,13 @@ def write_decision(conn, r: dict, now: str) -> None:
     minority = r["minority_report"] or {}
     props = {
         "title": r["title"],
+        "objective": r["title"],
+        "artifact": r.get("artifact"),
+        "evidence": r.get("evidence") or [],
+        "approved_conditions": minority.get("approved_conditions") or [],
+        "pending": "Awaiting human input" if r["status"] == "split" else
+                   "Implementation in progress" if r["status"] == "executing" else
+                   "Deliberation in progress" if r["status"] == "open" else None,
         "protocol": r["protocol"],
         "status": r["status"],
         "ruling": r["ruling"],
@@ -55,7 +62,7 @@ def write_decision(conn, r: dict, now: str) -> None:
         "mind_changes": minority.get("mind_changes") or [],
         "degraded": minority.get("degraded", False),
         "first_at": _iso(r["created_at"]),
-        "last_at": _iso(r["closed_at"] or r["created_at"]),
+        "last_at": _iso(r.get("last_message_at") or r["closed_at"] or r["created_at"]),
     }
     db.upsert_node(
         conn,
@@ -104,11 +111,16 @@ def main() -> None:
         ).fetchall()
         decisions = pg.execute(
             """
-            SELECT id, title, protocol, status, ruling, confidence,
-                   minority_report, thread, round, created_by,
-                   created_at, closed_at
-            FROM decisions
-            ORDER BY id
+            SELECT d.*,
+                   (SELECT max(created_at) FROM messages WHERE thread=d.thread) AS last_message_at,
+                   COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM (
+                       SELECT DISTINCT ON (author) id,author,kind,left(body,1800) AS body,created_at
+                       FROM messages WHERE thread=d.thread
+                         AND kind IN ('analisis','contexto','arbitraje','posicion','consulta','resultado')
+                       ORDER BY author,id DESC
+                   ) e), '[]'::jsonb) AS evidence
+            FROM decisions d
+            ORDER BY d.id
             """
         ).fetchall()
 

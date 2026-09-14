@@ -726,7 +726,7 @@ def test_la_memoria_del_grafo_entra_al_prompt_de_la_cabeza(fired_magi, monkeypat
     memoria llega a todas las cabezas (es contexto compartido). Sin grafo
     (degradado) los prompts no cambian."""
     import memory_ctx
-    monkeypatch.setattr(memory_ctx, "memoria_para", lambda t, a=None: "MEMORIA-PRUEBA-X")
+    monkeypatch.setattr(memory_ctx, "memoria_para", lambda t, a=None, thread=None: "MEMORIA-PRUEBA-X")
     relay.process_cycle(FakeConn([], decisions=[mk_decision_row()]), fresh_state())
     assert fired_magi, "tiene que haber disparos"
     assert all("MEMORIA-PRUEBA-X" in c["prompt"] for c in fired_magi)

@@ -175,6 +175,10 @@ def build_chat_prompt(seat: str, journal: list[dict]) -> tuple[str, str]:
     conversación desde su eje. Sin tag POSITION acá — no hay nada que votar.
     """
     persona = _persona(seat)
+    import memory_ctx
+    question = next((m.get('body') or '' for m in reversed(journal)
+                     if m.get('author') == 'adrian'), '')
+    memory = memory_ctx.memoria_para(question) if question else ''
     history = _history(journal, "(conversación vacía)")
     system = (
         f"{persona}\n\n"
@@ -183,6 +187,8 @@ def build_chat_prompt(seat: str, journal: list[dict]) -> tuple[str, str]:
         "de decisión: no votes ni uses tags — es charla, no una decisión formal."
     )
     user = f"Conversación hasta ahora:\n{history}\n\nRespondé al último mensaje."
+    if memory:
+        user = memory + '\n\n' + user
     return system, user
 
 

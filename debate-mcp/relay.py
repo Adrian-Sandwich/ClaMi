@@ -831,7 +831,10 @@ def fire_decision_turns(conn, state: dict, d: dict) -> None:
     # Memoria del consejo: una sola consulta al grafo por tanda de turnos,
     # misma para las tres cabezas (es contexto compartido, no una ventaja).
     # Si el grafo no existe o falla, memoria queda vacío: nada cambia.
-    memoria = memory_ctx.memoria_para(d["title"], d.get("artifact"))
+    recent = _journal_inline(conn, d['thread'])
+    followup = next((m.get('body') or '' for m in reversed(recent)
+                     if m.get('author') == 'adrian'), '')
+    memoria = memory_ctx.memoria_para(followup + ' ' + d['title'], d.get('artifact'), thread=d['thread'])
 
     for turn in turns:
         token = _token(d["thread"], turn["seat"])
@@ -999,6 +1002,11 @@ def process_cycle(conn, state: dict) -> None:
         # since_id-1: read_thread devuelve id > since_id, y cand["id"] es
         # justo el mensaje que disparó este trigger
         prompt = build_prompt(thread, cand["id"] - 1, cand["author"], other)
+        recent = _journal_inline(conn, thread)
+        question = next((m.get('body') or '' for m in reversed(recent)
+                         if m.get('author') == 'adrian'), '')
+        if question:
+            prompt += '\n\n' + memory_ctx.memoria_para(question)
         if trigger(other, thread, cand["id"] - 1, cwd, prompt, meta={"turn": "free"}):
             state["spawn_failures"].pop(_token(thread), None)
             ts["triggers"] += 1
